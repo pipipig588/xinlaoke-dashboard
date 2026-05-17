@@ -2,5 +2,3 @@ data/raw/
 __pycache__/
 *.pyc
 .DS_Store
-data/processed/orders.parquet
-data/processed/purchase_pairs.parquet
