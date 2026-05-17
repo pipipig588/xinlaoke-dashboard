@@ -52,12 +52,15 @@ def clean(df: pd.DataFrame) -> pd.DataFrame:
     reverse_map = {v: k for k, v in COLUMN_MAP.items()}
     df = df.rename(columns=reverse_map)
 
-    # 保留需要的列（忽略不存在的列，兼容不同格式的源表）
+    # ── 只保留必要的 6 列，其余全部丢弃（减少敏感信息）──
     needed = [
-        "user_id", "sku", "product_name", "influencer_name",
-        "order_status", "after_sale_status",
-        "quantity", "item_amount", "payable_amount",
-        "pay_time", "order_submit_time",
+        "user_id",          # 新老客判断（已加密）
+        "sku",              # 货号
+        "influencer_name",  # 达人昵称/渠道
+        "order_status",     # 订单状态
+        "payable_amount",   # 订单应付金额
+        "pay_time",         # 支付时间（优先）
+        "order_submit_time",# 备用时间（若 pay_time 为空）
     ]
     df = df[[c for c in needed if c in df.columns]].copy()
 
@@ -73,20 +76,14 @@ def clean(df: pd.DataFrame) -> pd.DataFrame:
     df["user_id"] = df["user_id"].astype(str).str.strip()
 
     # ── 数值字段 ──
-    for col in ("item_amount", "payable_amount", "quantity"):
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    if "payable_amount" in df.columns:
+        df["payable_amount"] = pd.to_numeric(df["payable_amount"], errors="coerce").fillna(0)
 
-    # 统一 gmv 字段（优先用 AMOUNT_FIELD 配置的字段）
-    if AMOUNT_FIELD in df.columns:
-        df["gmv"] = df[AMOUNT_FIELD]
-    elif "item_amount" in df.columns:
-        df["gmv"] = df["item_amount"]
-    else:
-        df["gmv"] = 0.0
+    # 统一 gmv 字段
+    df["gmv"] = df["payable_amount"] if "payable_amount" in df.columns else 0.0
 
     # ── 文本字段归一化 ──
-    for col in ("sku", "product_name", "order_status", "after_sale_status"):
+    for col in ("sku", "order_status"):
         if col in df.columns:
             df[col] = df[col].astype(str).str.strip().replace({"nan": "未知", "": "未知"})
         else:
@@ -191,7 +188,7 @@ def build_purchase_pairs(df: pd.DataFrame) -> pd.DataFrame:
     """
     df_s = df.sort_values(["user_id", "pay_time"]).copy()
 
-    shift_cols = ["pay_time", "influencer_name", "sku", "product_name", "order_ym",
+    shift_cols = ["pay_time", "influencer_name", "sku", "order_ym",
                   "purchase_rank", "order_date", "gmv", "order_status"]
 
     for col in shift_cols:
@@ -210,7 +207,6 @@ def build_purchase_pairs(df: pd.DataFrame) -> pd.DataFrame:
         "order_ym":             "from_ym",
         "influencer_name":      "from_influencer",
         "sku":                  "from_sku",
-        "product_name":         "from_product",
         "purchase_rank":        "from_rank",
         "order_date":           "from_date",
         "gmv":                  "from_gmv",
@@ -218,7 +214,6 @@ def build_purchase_pairs(df: pd.DataFrame) -> pd.DataFrame:
         "next_order_ym":        "to_ym",
         "next_influencer_name": "to_influencer",
         "next_sku":             "to_sku",
-        "next_product_name":    "to_product",
         "next_purchase_rank":   "to_rank",
         "next_order_date":      "to_date",
         "next_gmv":             "to_gmv",
@@ -227,10 +222,10 @@ def build_purchase_pairs(df: pd.DataFrame) -> pd.DataFrame:
 
     keep = [
         "user_id", "customer_type",
-        "from_ym", "from_date", "from_influencer", "from_sku", "from_product",
+        "from_ym", "from_date", "from_influencer", "from_sku",
         "from_rank", "from_gmv", "from_status",
-        "to_ym",   "to_date",   "to_influencer",   "to_sku",   "to_product",
-        "to_rank",  "to_gmv",   "to_status",
+        "to_ym", "to_date", "to_influencer", "to_sku",
+        "to_rank", "to_gmv", "to_status",
         "days_between",
     ]
     pairs = pairs[[c for c in keep if c in pairs.columns]]
@@ -247,12 +242,10 @@ def save_all(df: pd.DataFrame, pairs: pd.DataFrame, out_dir: str):
     df.to_parquet(f"{out_dir}/orders.parquet", index=False)
     pairs.to_parquet(f"{out_dir}/purchase_pairs.parquet", index=False)
 
-    after_sale = sorted(df["after_sale_status"].dropna().unique().tolist()) if "after_sale_status" in df.columns else []
     meta = {
-        "skus":                sorted(df["sku"].dropna().unique().tolist()),
-        "influencers":         sorted(df["influencer_name"].dropna().unique().tolist()),
-        "order_statuses":      sorted(df["order_status"].dropna().unique().tolist()),
-        "after_sale_statuses": after_sale,
+        "skus":           sorted(df["sku"].dropna().unique().tolist()),
+        "influencers":    sorted(df["influencer_name"].dropna().unique().tolist()),
+        "order_statuses": sorted(df["order_status"].dropna().unique().tolist()),
         "date_min":            str(df["order_date"].min()),
         "date_max":            str(df["order_date"].max()),
         "gmv_max":             float(df["gmv"].max()),
