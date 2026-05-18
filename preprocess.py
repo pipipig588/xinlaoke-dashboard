@@ -29,7 +29,9 @@ from config import (
 # ── 1. 加载 ───────────────────────────────────────────────────────────────────
 
 def load_all_excel(data_dir: str) -> pd.DataFrame:
-    files = list(Path(data_dir).glob("*.xlsx"))
+    # 过滤掉 Excel/WPS 打开时产生的临时文件（以 .~ 或 ~$ 开头）
+    files = [f for f in Path(data_dir).glob("*.xlsx")
+             if not f.name.startswith(".~") and not f.name.startswith("~$")]
     if not files:
         print(f"[ERROR] 在 {data_dir} 目录下没有找到 .xlsx 文件")
         sys.exit(1)
