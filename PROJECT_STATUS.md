@@ -8,10 +8,15 @@
 
 | 项目 | 地址 |
 |------|------|
-| Streamlit 线上地址 | https://xinlaoke-dashboard-gmfi33an9wuvoezw6vnbaw.streamlit.app |
-| GitHub 仓库 | https://github.com/pipipig588/xinlaoke-dashboard（私有） |
+| Streamlit 本地地址 | http://localhost:8501 |
+| Tailscale 远程地址 | http://100.106.228.108:8501 |
+| 公司内网地址 | http://172.16.13.113:8501（Mac 接公司网络后生效） |
+| 局域网地址（同办公室热点） | http://172.20.10.4:8501 |
+| GitHub 仓库 | https://github.com/pipipig588/xinlaoke-dashboard（私有，仅存代码） |
 | 本地路径（Mac） | `/Users/anirv/Downloads/xinlaoke/` |
-| GitHub 账号 | pipipig588 |
+| 备份路径 | `/Users/anirv/Downloads/xinlaoke_backup_20260520_1856/` |
+
+> ⚠️ 数据安全第一：数据文件（data/）只在本地 Mac mini，不上传 GitHub。外部访问只走 Tailscale 加密隧道。
 
 ---
 
@@ -20,13 +25,17 @@
 ```
 xinlaoke/
 ├── app.py                  # Streamlit 主应用（5个Tab）
-├── config.py               # 字段名 & 参数配置（改这里适配新数据）
+├── config.py               # 字段名 & 基础参数配置
 ├── preprocess.py           # Excel → Parquet 预处理脚本
 ├── requirements.txt        # Python 依赖
+├── 启动仪表盘.command       # 双击一键启动（自动显示 Tailscale URL）
 ├── PROJECT_STATUS.md       # 本文件
 ├── data/
-│   ├── raw/                # 放 Excel 源表（不上传 GitHub）
-│   └── processed/          # 预处理生成（orders.parquet 等）
+│   ├── raw/                # 放 Excel 源表（不上传 GitHub，gitignore 整个 data/）
+│   └── processed/          # 预处理生成文件
+│       ├── orders.parquet
+│       ├── purchase_pairs.parquet
+│       └── meta.json
 └── .streamlit/
     └── config.toml         # Streamlit 主题配置
 ```
@@ -35,110 +44,154 @@ xinlaoke/
 
 ## 三、数据情况
 
-- **最新源表**：`data/raw/工作簿3.xlsx`（全量历史订单）
-- **数据规模**：88万行，66万买家，2025-03 ~ 2026-05
-- **预处理后保留字段（6列，已去敏）**：
-  - `user_id`（加密后的买家ID）
-  - `sku`（货号）
-  - `influencer_name`（达人昵称/渠道，空值标记为"货架"）
-  - `order_status`（订单状态）
-  - `payable_amount` → `gmv`（订单应付金额）
-  - `pay_time`（支付时间）
+- **最新源表**：`data/raw/报表订单.xlsx`（多 Sheet：`23-24`、`25`、`26`，预处理自动合并）
+- **数据规模**：191万行，134万买家，2023-03-30 ~ 2026-05-28
+- **预处理后字段**：
+  - `user_id`（淘宝ID）、`sku`（货号）、`influencer_name`（达人昵称，空值→"货架"）
+  - `order_status`（订单状态）、`gmv`（订单应付金额）、`pay_time`（支付时间）
+  - `category`（品类）、`channel_type`（渠道类型：自营/达人）
+  - `platform_discount`（平台优惠原文，格式：`券名-金额;券名-金额`，空值/"-"已统一为空串）
+  - `customer_type`（全时段新老客标签）、`customer_type_r12`（滚动窗口新老客标签）
+  - `purchase_rank`（该用户第几次购买）
+
+> 平台优惠覆盖率：2024-08 起逐步上升，2025-2026 多数月份 50%-85%。
+> 早期月份（2023-2024H1）几乎无平台补贴券，属正常历史数据。
 
 ---
 
-## 四、老客判定规则
+## 四、新老客判定逻辑（重要）
 
+### ⚡ 统一一套标签（重要架构决定）
+
+**所有 Tab 统一使用 `customer_type_r12`**，在 `main()` 入口处直接覆盖：
+```python
+orders["customer_type"] = orders["customer_type_r12"]
+pairs["customer_type"]  = pairs["customer_type_r12"]
 ```
-老客 = 该用户在当前订单之前，有过至少1笔：
-  - 订单状态 = "已完成"
-  - 订单应付金额 >= 550 元
-  - 支付时间早于当前订单至少 1 天
-的历史订单
+- preprocess 预计算时仍保留两列（`customer_type` 全时段 + `customer_type_r12` 滚动窗口）
+- 运行时 app 统一以 `customer_type_r12` 为准，避免侧边栏改参数后各 Tab 定义不一致的混乱
+
+### 有效成交条件（三项同时满足）
+```
+✅ 订单状态 = 已完成
+✅ 订单金额 ≥ X 元（默认 550）
+✅ 渠道类型 ∈ 选定渠道（默认不限，即自营+达人都算）
 ```
 
-**特殊规则**：选定时间段内，若某用户既有新客订单又有老客订单 → 按**新客**计（config.py 可调整阈值）。
+### 滚动窗口老客判定（全局生效）
+```
+当前订单往前 N 天内（默认9999天≈全时段）有有效成交 → 老客
+否则（从未买过 or 超N天未买）→ 新客
+```
+
+> **N 天默认 9999（等同全时段）**，侧边栏可改为 365（R12）、730（R24）等。
+
+### 侧边栏可自定义参数（⚙️ 老客判定规则）
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| 有效成交渠道 | 全渠道 | 可限定只有"自营"才算有效成交 |
+| 最低金额 | ¥550 | 低于此不算有效成交 |
+| 最少间隔天数 | 1天 | 有效成交需早于当前订单至少N天 |
+| R12回溯窗口 | 9999天 | 滚动窗口天数（9999≈全时段） |
+
+> 参数改变时 app 自动重算（首次约30-60秒），相同参数有缓存不重算。修改后**所有 Tab 同步生效**。
 
 ---
 
-##五、5个功能 Tab
+## 五、5个功能 Tab
 
 | Tab | 功能 |
 |-----|------|
-| 📈 新老客趋势 | 每日/月堆积柱状图，可切换订单数/GMV/占比，可按渠道分组 |
-| 📦 货品分析 | 各货号新老客占比 + 销量排名，支持货号关键词（如"tl"）过滤 |
+| 📈 新老客趋势 | 每日/月堆积柱状图，可切换订单数/GMV/占比，可按渠道分组；支持 YOY 同比（自定义对比时间段），6行汇总表含涨跌 |
+| 📦 货品分析 | 各货号新老客占比 + 销量/GMV排名 + 全店占比%，支持货号关键词过滤，可下载 CSV |
 | ⏱ 复购周期 | 渠道→渠道 / 货号→货号 平均间隔天数热力图 |
-| 🔁 复购率 | 选首次购买渠道/货号，看后续复购去向分布 |
-| 🔄 渠道流转 | 购买顺序 Sankey 流转图（第1次→第2次→第3次直播间） |
+| 🔁 复购率 | 月度复购率趋势（环比）+ 复购去向分布（渠道汇总柱状图，可展开查看各渠道下达人详情），老客定义以侧边栏为准 |
+| 🔄 渠道流转 | 购买顺序 Sankey 流转图，节点显示出流量，hover 显示转化量和转化率 |
+| 💰 平台优惠 | 真实收入核算：自动从「平台优惠」字段提取所有券名（共 648 种），手动勾选平台补贴类券，自动计算「真实收入 = 客户实付 + 平台补贴」；含月度趋势图、各券补贴占比饼图、订单明细表、CSV 导出 |
 
 ---
 
-## 六、更新数据流程（每次换源表执行）
+## 六、侧边栏筛选顺序
+
+1. 时间范围 + YOY 同比开关
+2. 渠道类型（自营/达人）
+3. 达人（联动渠道类型）
+4. 品类（联动货号）
+5. 货号（联动品类）
+6. 订单状态
+7. 成交金额区间
+8. ⚙️ 老客判定规则
+
+---
+
+## 七、启动方式
 
 ```bash
-# 1. 把新 Excel 放入 data/raw/（先关掉 Excel 再操作，避免临时文件干扰）
-# 2. 预处理（约 60 秒）
+# 方式1：双击 Finder 里的「启动仪表盘.command」
+
+# 方式2：手动启动
+cd /Users/anirv/Downloads/xinlaoke
+STREAMLIT_SERVER_HEADLESS=true /Users/anirv/Library/Python/3.9/bin/streamlit run app.py \
+  --server.address 0.0.0.0 --server.port 8501 \
+  --server.enableCORS false --server.enableXsrfProtection false
+```
+
+> Mac mini 需联网才能让远程同事通过 Tailscale 访问。同办公室可用局域网 IP（不需要联网）。
+
+---
+
+## 八、更新数据流程（每次换源表执行）
+
+```bash
+# 1. 把新 Excel 放入 data/raw/（先关掉 Excel 避免临时文件干扰）
+# 2. 预处理（约 60-90 秒）
+cd /Users/anirv/Downloads/xinlaoke
 python3 preprocess.py
 
-# 3. 推送到 GitHub（Streamlit Cloud 自动刷新，约 30 秒）
-git add data/processed/
-git commit -m "更新数据 YYYY-MM"
+# 3. 推送代码到 GitHub（只推代码，不推数据）
+git add app.py config.py preprocess.py
+git commit -m "更新代码 YYYY-MM-DD"
 git push
 ```
 
----
-
-## 七、⚠️ 待解决问题
-
-### 问题1：GitHub 文件超过 50MB 限制
-- **现象**：`git push` 报警告 `File is 57.67 MB; this is larger than GitHub's recommended maximum file size of 50.00 MB`，push 被拒绝
-- **原因**：orders.parquet 数据量增大后超出 GitHub 限制
-- **解决方案（二选一）**：
-  - 方案A：启用 Git LFS（`git lfs install && git lfs track "*.parquet"`）
-  - 方案B：在 preprocess.py 中对 orders.parquet 做压缩（`compression='gzip'`）或只存必要聚合数据
-- **临时绕过**：数据目前在本地，Streamlit Cloud 尚未拿到最新数据，需先解决此问题再推
-
-### 问题2：渠道筛选空白项显示
-- **现象**：侧边栏渠道筛选下拉里可能有空白选项
-- **状态**：preprocess.py 已将空值标记为"货架"，meta.json 已更新，待确认线上是否还有残留
+> data/ 目录已在 .gitignore 中完整屏蔽，不会误传数据。
 
 ---
 
-## 八、📋 待开发需求
+## 九、同事使用 Tailscale 接入方式
 
-### 需求1：对比日期功能（已提出，待开发）
-- 用户可以选择两个时间段（如 2025-Q4 vs 2026-Q1），并排对比新老客/GMV/复购率
-- 建议实现：侧边栏增加"对比模式"开关，开启后出现第二个日期选择器，图表双色展示
+1. 同事安装 Tailscale：https://tailscale.com/download
+2. 用 GitHub 账号登录
+3. 你在管理台邀请：https://login.tailscale.com/admin/users → Invite users
+4. 同事连上后访问：http://100.106.228.108:8501
 
-### 需求2：同事补充需求（待收集）
-- 下次对话补充
-
----
-
-## 九、本地运行命令
-
-```bash
-# 安装依赖（只需一次）
-pip3 install streamlit pandas plotly openpyxl pyarrow
-
-# 启动（本地预览）
-cd /Users/anirv/Downloads/xinlaoke
-/Users/anirv/Library/Python/3.9/bin/streamlit run app.py
-
-# 启动（局域网可访问）
-/Users/anirv/Library/Python/3.9/bin/streamlit run app.py --server.address 0.0.0.0 --server.port 8501
-```
+> 浏览器显示「不安全」是正常的，Tailscale 本身已端对端加密，比 https 更安全。
 
 ---
 
-## 十、关键配置（config.py）
+## 十、同事访问方式
 
-```python
-OLD_CUSTOMER_MIN_AMOUNT    = 550        # 老客门槛金额（元）
-OLD_CUSTOMER_MIN_DAYS      = 1          # 历史订单需早于当前订单几天
-TRANSACTION_SUCCESS_STATUS = "已完成"   # 有效历史成交的订单状态
-AMOUNT_FIELD               = "payable_amount"  # 使用订单应付金额
-```
+| 场景 | 方式 |
+|------|------|
+| 公司内网（Mac 接公司网络后） | 直接访问 http://172.16.13.113:8501，无需任何账号 |
+| 远程（Tailscale） | 管理台邀请 https://login.tailscale.com/admin/users → 同事登录后访问 http://100.106.228.108:8501 |
+| 局域网（同办公室热点） | http://172.20.10.4:8501 |
+
+> 公司内网访问检查清单：
+> 1. Mac 接入公司网络后，运行 `ipconfig getifaddr en0`（有线）或 `ipconfig getifaddr en1`（WiFi）确认 IP 为 172.16.13.113
+> 2. 双击「启动仪表盘.command」，启动脚本会自动显示当前公司内网链接
+> 3. 同事浏览器访问 http://172.16.13.113:8501 即可
+> 4. macOS 防火墙首次启动可能弹窗，点「允许」放行
+
+---
+
+## 十一、待开发需求
+
+### 需求1：中国同事内网部署
+- 同事公司有可用电脑，拿到内网 IP 后告知 Dan，一键部署脚本待写
+
+### 需求2：同事补充功能需求
+- 待收集
 
 ---
 

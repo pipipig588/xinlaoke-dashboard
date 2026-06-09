@@ -25,19 +25,29 @@ sleep 6
 # 获取 Tailscale IP
 TAILSCALE_IP=$(tailscale ip -4 2>/dev/null || /Applications/Tailscale.app/Contents/MacOS/Tailscale ip -4 2>/dev/null)
 
+# 获取局域网 IP（优先 172.16.x.x 公司内网，其次任何 inet 地址）
+LAN_IPS=$(ifconfig | awk '/inet /{print $2}' | grep -v 127.0.0.1)
+COMPANY_IP=$(echo "$LAN_IPS" | grep '^172\.16\.' | head -1)
+OTHER_IPS=$(echo "$LAN_IPS" | grep -v '^172\.16\.')
+
 echo ""
 echo "✅ 启动成功！"
 echo "========================================"
-if [ -n "$TAILSCALE_IP" ]; then
-    echo "🔒 Tailscale 私有链接: http://$TAILSCALE_IP:8501"
-    echo "   （只有加入你 Tailscale 网络的人才能访问）"
-else
-    echo "⚠️  Tailscale 未连接，请先打开 Tailscale app"
-fi
 echo "💻 本地链接:          http://localhost:8501"
+if [ -n "$COMPANY_IP" ]; then
+    echo "🏢 公司内网链接:      http://$COMPANY_IP:8501"
+fi
+for ip in $OTHER_IPS; do
+    echo "🌐 局域网链接:        http://$ip:8501"
+done
+if [ -n "$TAILSCALE_IP" ]; then
+    echo "🔒 Tailscale 私有:    http://$TAILSCALE_IP:8501"
+fi
 echo "========================================"
 echo ""
-echo "📤 把 Tailscale 私有链接发给同事（同事需先加入你的 Tailscale 网络）"
+echo "📤 同事访问方式："
+echo "   • 同公司内网 → 公司内网链接（无需任何账号）"
+echo "   • 远程       → Tailscale 私有链接（需加入 Tailscale 网络）"
 echo "❌ 关闭此窗口会停止服务，请保持此窗口开着"
 echo ""
 

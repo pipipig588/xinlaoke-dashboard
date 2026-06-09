@@ -4,7 +4,7 @@
 
 COLUMN_MAP = {
     "order_id":          "主订单编号",
-    "user_id":           "用户id",
+    "user_id":           "淘宝ID",
     "sub_order_id":      "子订单编号",
     "product_name":      "选购商品",
     "product_id":        "商品ID",
@@ -22,6 +22,9 @@ COLUMN_MAP = {
     "payable_amount":    "订单应付金额",
     "influencer_id":     "达人ID",
     "influencer_name":   "达人昵称",       # 直播间/渠道维度
+    "category":          "品类",
+    "channel_type":      "渠道",
+    "platform_discount": "平台优惠",       # 平台补贴券原文 "券名-金额;券名-金额"
 }
 
 # ── 老客判定规则 ──────────────────────────────────────────────────────────────

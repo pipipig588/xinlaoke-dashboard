@@ -38,9 +38,11 @@ def load_all_excel(data_dir: str) -> pd.DataFrame:
 
     dfs = []
     for f in sorted(files):
-        print(f"  读取 {f.name} ...")
-        df = pd.read_excel(f, dtype=str)
-        dfs.append(df)
+        xl = pd.ExcelFile(f)
+        for sheet in xl.sheet_names:
+            print(f"  读取 {f.name} [sheet={sheet}] ...")
+            df = pd.read_excel(xl, sheet_name=sheet, dtype=str)
+            dfs.append(df)
 
     combined = pd.concat(dfs, ignore_index=True)
     print(f"  合并后共 {len(combined):,} 行")
@@ -54,15 +56,19 @@ def clean(df: pd.DataFrame) -> pd.DataFrame:
     reverse_map = {v: k for k, v in COLUMN_MAP.items()}
     df = df.rename(columns=reverse_map)
 
-    # ── 只保留必要的 6 列，其余全部丢弃（减少敏感信息）──
+    # ── 只保留必要列，其余全部丢弃（减少敏感信息）──
     needed = [
         "user_id",          # 新老客判断（已加密）
         "sku",              # 货号
         "influencer_name",  # 达人昵称/渠道
         "order_status",     # 订单状态
+        "after_sale_status",# 售后状态
         "payable_amount",   # 订单应付金额
         "pay_time",         # 支付时间（优先）
         "order_submit_time",# 备用时间（若 pay_time 为空）
+        "category",         # 品类
+        "channel_type",     # 渠道类型
+        "platform_discount",# 平台优惠原文
     ]
     df = df[[c for c in needed if c in df.columns]].copy()
 
@@ -90,6 +96,14 @@ def clean(df: pd.DataFrame) -> pd.DataFrame:
             df[col] = df[col].astype(str).str.strip().replace({"nan": "未知", "": "未知"})
         else:
             df[col] = "未知"
+    # 售后状态："-" 与空值都视为「无售后」
+    if "after_sale_status" in df.columns:
+        df["after_sale_status"] = (
+            df["after_sale_status"].astype(str).str.strip()
+            .replace({"nan": "无售后", "": "无售后", "-": "无售后", "None": "无售后"})
+        )
+    else:
+        df["after_sale_status"] = "无售后"
     # 达人昵称单独处理：空值标记为"货架"
     if "influencer_name" in df.columns:
         df["influencer_name"] = (
@@ -98,6 +112,22 @@ def clean(df: pd.DataFrame) -> pd.DataFrame:
         )
     else:
         df["influencer_name"] = "货架"
+
+    # 品类和渠道类型
+    for col, default in [("category", "未分类"), ("channel_type", "未知")]:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.strip().replace({"nan": default, "": default})
+        else:
+            df[col] = default
+
+    # 平台优惠原文：保留为字符串，空值/"-"统一为空串
+    if "platform_discount" in df.columns:
+        df["platform_discount"] = (
+            df["platform_discount"].astype(str).str.strip()
+            .replace({"nan": "", "-": "", "None": ""})
+        )
+    else:
+        df["platform_discount"] = ""
 
     # ── 时间衍生字段 ──
     df["order_date"] = df["pay_time"].dt.date
@@ -170,6 +200,30 @@ def label_customer_type(df: pd.DataFrame) -> pd.DataFrame:
     n_new = (df["customer_type"] == "新客").sum()
     n_old = (df["customer_type"] == "老客").sum()
     print(f"  新客订单: {n_new:,}  |  老客订单: {n_old:,}")
+
+    # ── R12 老客：默认9999天（≈全时段），侧边栏可调 ──
+    print("  计算 R12 老客标签（滚动9999天，默认等同全时段）...")
+    df["customer_type_r12"] = "新客"
+
+    users_with_qualifying = set(qualifying["user_id"].unique())
+    q_times = qualifying[["user_id", "pay_time"]].copy()
+
+    df_sub = df[df["user_id"].isin(users_with_qualifying)][["user_id", "pay_time"]].reset_index()
+    cross = df_sub.merge(
+        q_times.rename(columns={"pay_time": "q_time"}),
+        on="user_id", how="left"
+    )
+    cross["days_diff"] = (cross["pay_time"] - cross["q_time"]).dt.days
+    in_window = cross[
+        (cross["days_diff"] >= OLD_CUSTOMER_MIN_DAYS) &
+        (cross["days_diff"] <= 9999)
+    ]
+    r12_old_orig_idx = in_window["index"].unique()
+    df.loc[r12_old_orig_idx, "customer_type_r12"] = "老客"
+
+    n_r12_new = (df["customer_type_r12"] == "新客").sum()
+    n_r12_old = (df["customer_type_r12"] == "老客").sum()
+    print(f"  新客订单: {n_r12_new:,}  |  老客订单（R12）: {n_r12_old:,}")
     return df
 
 
@@ -191,7 +245,8 @@ def build_purchase_pairs(df: pd.DataFrame) -> pd.DataFrame:
     df_s = df.sort_values(["user_id", "pay_time"]).copy()
 
     shift_cols = ["pay_time", "influencer_name", "sku", "order_ym",
-                  "purchase_rank", "order_date", "gmv", "order_status"]
+                  "purchase_rank", "order_date", "gmv", "order_status",
+                  "category", "channel_type", "customer_type", "customer_type_r12"]
 
     for col in shift_cols:
         if col in df_s.columns:
@@ -220,14 +275,18 @@ def build_purchase_pairs(df: pd.DataFrame) -> pd.DataFrame:
         "next_order_date":      "to_date",
         "next_gmv":             "to_gmv",
         "next_order_status":    "to_status",
+        "category":             "from_category",
+        "channel_type":         "from_channel_type",
+        "next_category":        "to_category",
+        "next_channel_type":    "to_channel_type",
     })
 
     keep = [
-        "user_id", "customer_type",
+        "user_id", "customer_type", "customer_type_r12",
         "from_ym", "from_date", "from_influencer", "from_sku",
-        "from_rank", "from_gmv", "from_status",
+        "from_rank", "from_gmv", "from_status", "from_category", "from_channel_type",
         "to_ym", "to_date", "to_influencer", "to_sku",
-        "to_rank", "to_gmv", "to_status",
+        "to_rank", "to_gmv", "to_status", "to_category", "to_channel_type",
         "days_between",
     ]
     pairs = pairs[[c for c in keep if c in pairs.columns]]
@@ -244,10 +303,31 @@ def save_all(df: pd.DataFrame, pairs: pd.DataFrame, out_dir: str):
     df.to_parquet(f"{out_dir}/orders.parquet", index=False)
     pairs.to_parquet(f"{out_dir}/purchase_pairs.parquet", index=False)
 
+    # 渠道→达人映射（用于侧边栏联动）
+    influencer_channel_map = {}
+    if "channel_type" in df.columns:
+        influencer_channel_map = (
+            df[["influencer_name", "channel_type"]]
+            .drop_duplicates()
+            .set_index("influencer_name")["channel_type"]
+            .to_dict()
+        )
+
+    # 品类→货号映射（用于侧边栏联动）
+    category_sku_map = {}
+    if "category" in df.columns:
+        for cat, grp in df.groupby("category"):
+            category_sku_map[cat] = sorted(grp["sku"].dropna().unique().tolist())
+
     meta = {
-        "skus":           sorted(df["sku"].dropna().unique().tolist()),
-        "influencers":    sorted(df["influencer_name"].dropna().unique().tolist()),
-        "order_statuses": sorted(df["order_status"].dropna().unique().tolist()),
+        "skus":                sorted(df["sku"].dropna().unique().tolist()),
+        "influencers":         sorted(df["influencer_name"].dropna().unique().tolist()),
+        "order_statuses":      sorted(df["order_status"].dropna().unique().tolist()),
+        "after_sale_statuses": sorted(df["after_sale_status"].dropna().unique().tolist()) if "after_sale_status" in df.columns else [],
+        "categories":          sorted(df["category"].dropna().unique().tolist()) if "category" in df.columns else [],
+        "channel_types":       sorted(df["channel_type"].dropna().unique().tolist()) if "channel_type" in df.columns else [],
+        "influencer_channel_map": influencer_channel_map,
+        "category_sku_map":    category_sku_map,
         "date_min":            str(df["order_date"].min()),
         "date_max":            str(df["order_date"].max()),
         "gmv_max":             float(df["gmv"].max()),
