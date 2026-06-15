@@ -16,7 +16,9 @@ import pandas as pd
 from config import (
     AMOUNT_FIELD,
     COLUMN_MAP,
+    CROWD_FILE_KEYWORD,
     MAX_PURCHASE_RANK,
+    MEMBER_FILE_KEYWORD,
     OLD_CUSTOMER_MIN_AMOUNT,
     OLD_CUSTOMER_MIN_DAYS,
     ORDERS_FILE_KEYWORD,
@@ -380,6 +382,63 @@ def clean_samples(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# ── 5c. 会员表清洗 ─────────────────────────────────────────────────────────────
+
+def clean_members(df: pd.DataFrame) -> pd.DataFrame:
+    """清洗会员表（淘宝ID + 入会时间）→ members.parquet。每个会员保留最早入会时间。"""
+    reverse_map = {v: k for k, v in COLUMN_MAP.items()}
+    df = df.rename(columns=reverse_map)
+
+    if "user_id" not in df.columns:
+        print("  [警告] 会员表缺少「淘宝ID」列，跳过")
+        return pd.DataFrame(columns=["user_id", "join_time"])
+
+    df = df[[c for c in ("user_id", "join_time") if c in df.columns]].copy()
+    df["user_id"] = df["user_id"].astype(str).str.strip()
+    df = df[df["user_id"].replace({"nan": "", "None": ""}) != ""]
+
+    if "join_time" in df.columns:
+        df["join_time"] = pd.to_datetime(df["join_time"], errors="coerce")
+    else:
+        df["join_time"] = pd.NaT
+
+    # 同一会员可能多行，保留最早入会时间
+    df = df.sort_values("join_time").drop_duplicates(subset=["user_id"], keep="first")
+    df["join_ym"] = df["join_time"].dt.strftime("%Y-%m")
+
+    n_with_time = df["join_time"].notna().sum()
+    print(f"  会员清洗后剩余 {len(df):,} 个会员  |  有入会时间 {n_with_time:,}")
+    return df
+
+
+# ── 5d. 上传人群表清洗 ─────────────────────────────────────────────────────────
+
+def clean_crowds(df: pd.DataFrame) -> pd.DataFrame:
+    """清洗上传人群表（人群名称 + 淘宝ID）→ crowds.parquet。人群id 即淘宝ID。"""
+    reverse_map = {v: k for k, v in COLUMN_MAP.items()}
+    df = df.rename(columns=reverse_map)
+
+    if "user_id" not in df.columns:
+        print("  [警告] 人群表缺少「淘宝ID」列，跳过")
+        return pd.DataFrame(columns=["crowd_name", "user_id"])
+
+    df = df[[c for c in ("crowd_name", "user_id") if c in df.columns]].copy()
+    df["user_id"] = df["user_id"].astype(str).str.strip()
+    df = df[df["user_id"].replace({"nan": "", "None": ""}) != ""]
+
+    if "crowd_name" in df.columns:
+        df["crowd_name"] = (
+            df["crowd_name"].astype(str).str.strip()
+            .replace({"nan": "未命名人群", "": "未命名人群", "None": "未命名人群"})
+        )
+    else:
+        df["crowd_name"] = "未命名人群"
+
+    df = df.drop_duplicates(subset=["crowd_name", "user_id"])
+    print(f"  人群清洗后剩余 {len(df):,} 行  |  人群数 {df['crowd_name'].nunique()}  |  去重成员 {df['user_id'].nunique():,}")
+    return df
+
+
 # ── 6. 保存 ───────────────────────────────────────────────────────────────────
 
 def save_all(df: pd.DataFrame, pairs: pd.DataFrame, out_dir: str):
@@ -435,26 +494,41 @@ def save_all(df: pd.DataFrame, pairs: pd.DataFrame, out_dir: str):
 
 if __name__ == "__main__":
     print("=" * 55)
-    print("Step 1/6  加载订单 Excel ...")
+    print("Step 1/8  加载订单 Excel ...")
     raw = load_all_excel(RAW_DATA_DIR, ORDERS_FILE_KEYWORD)
 
-    print("Step 2/6  清洗数据 ...")
+    print("Step 2/8  清洗数据 ...")
     df = clean(raw)
 
-    print("Step 3/6  标记新老客 ...")
+    print("Step 3/8  标记新老客 ...")
     df = label_customer_type(df)
 
-    print("Step 4/6  计算购买序号与购买对 ...")
+    print("Step 4/8  计算购买序号与购买对 ...")
     df = add_purchase_rank(df)
     pairs = build_purchase_pairs(df)
 
-    print("Step 5/6  保存订单文件 ...")
+    print("Step 5/8  保存订单文件 ...")
     save_all(df, pairs, PROCESSED_DATA_DIR)
 
-    print("Step 6/6  处理派样（试用装）表 ...")
+    Path(PROCESSED_DATA_DIR).mkdir(parents=True, exist_ok=True)
+
+    print("Step 6/8  处理派样（试用装）表 ...")
     sample_raw = load_all_excel(RAW_DATA_DIR, SAMPLE_FILE_KEYWORD, required=False)
     if sample_raw is not None:
         samples = clean_samples(sample_raw)
-        Path(PROCESSED_DATA_DIR).mkdir(parents=True, exist_ok=True)
         samples.to_parquet(f"{PROCESSED_DATA_DIR}/samples.parquet", index=False)
         print(f"   ✅ 派样数据已保存 → {PROCESSED_DATA_DIR}/samples.parquet")
+
+    print("Step 7/8  处理会员表 ...")
+    member_raw = load_all_excel(RAW_DATA_DIR, MEMBER_FILE_KEYWORD, required=False)
+    if member_raw is not None:
+        members = clean_members(member_raw)
+        members.to_parquet(f"{PROCESSED_DATA_DIR}/members.parquet", index=False)
+        print(f"   ✅ 会员数据已保存 → {PROCESSED_DATA_DIR}/members.parquet")
+
+    print("Step 8/8  处理上传人群表 ...")
+    crowd_raw = load_all_excel(RAW_DATA_DIR, CROWD_FILE_KEYWORD, required=False)
+    if crowd_raw is not None:
+        crowds = clean_crowds(crowd_raw)
+        crowds.to_parquet(f"{PROCESSED_DATA_DIR}/crowds.parquet", index=False)
+        print(f"   ✅ 人群数据已保存 → {PROCESSED_DATA_DIR}/crowds.parquet")

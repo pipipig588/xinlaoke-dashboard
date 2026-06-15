@@ -55,6 +55,18 @@ def load_samples() -> pd.DataFrame:
     return df
 
 
+@st.cache_data
+def load_members() -> pd.DataFrame:
+    df = pd.read_parquet("data/processed/members.parquet")
+    df["join_time"] = pd.to_datetime(df["join_time"])
+    return df
+
+
+@st.cache_data
+def load_crowds() -> pd.DataFrame:
+    return pd.read_parquet("data/processed/crowds.parquet")
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 侧边栏筛选
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2073,6 +2085,188 @@ def tab_sample_repurchase(df: pd.DataFrame):
     )
 
 
+def tab_membership(df: pd.DataFrame):
+    """会员分析：① 按入会时间分新/老会员看购买；② 会员 vs 非会员对比。
+    购买口径 = 左侧全局筛选（df 已是全局筛选后的订单）。"""
+    st.subheader("会员分析 — 新老会员 & 会员/非会员")
+    st.caption(
+        "会员表仅含「淘宝ID + 入会时间」。下方按入会时间区分新/老会员，"
+        "并与订单表匹配看购买表现；**购买口径 = 左侧全局筛选**。"
+    )
+
+    try:
+        members = load_members()
+    except FileNotFoundError:
+        st.info(
+            "尚未生成会员数据。请把 `会员.xlsx`（含「淘宝ID」「入会时间」两列）放入 "
+            "`data/raw/` 后重新运行 `python preprocess.py`。"
+        )
+        return
+
+    has_time = members["join_time"].notna().any()
+    if has_time:
+        jmin = members["join_time"].min().date()
+        jmax = members["join_time"].max().date()
+        default_start = max(jmin, (members["join_time"].max() - pd.Timedelta(days=365)).date())
+        nd = st.date_input(
+            "① 新会员入会时间（此区间内入会 = 新会员，更早入会 = 老会员）",
+            value=(default_start, jmax), min_value=jmin, max_value=jmax, key="mb_date",
+        )
+        if isinstance(nd, (tuple, list)) and len(nd) == 2:
+            nd0, nd1 = nd
+        else:
+            nd0 = nd1 = nd if not isinstance(nd, (tuple, list)) else nd[0]
+        is_new = (members["join_time"].dt.date >= nd0) & (members["join_time"].dt.date <= nd1)
+    else:
+        st.warning("会员表「入会时间」为空，暂无法区分新老会员，仅做会员/非会员对比。")
+        is_new = pd.Series(False, index=members.index)
+
+    members = members.copy()
+    members["会员类型"] = "老会员"
+    members.loc[is_new, "会员类型"] = "新会员"
+    member_type = members.set_index("user_id")["会员类型"]
+    member_ids = set(members["user_id"])
+
+    n_total = len(members)
+    n_new   = int((members["会员类型"] == "新会员").sum())
+    n_old   = n_total - n_new
+
+    mo = df[df["user_id"].isin(member_ids)].copy()
+    mo["会员类型"] = mo["user_id"].map(member_type)
+    n_buyers = mo["user_id"].nunique()
+    conv = (n_buyers / n_total) if n_total else 0.0
+
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("会员总数", f"{n_total:,}")
+    k2.metric("新会员", f"{n_new:,}")
+    k3.metric("老会员", f"{n_old:,}")
+    k4.metric("有购买会员数", f"{n_buyers:,}")
+    k5.metric("会员购买转化率", f"{conv * 100:.2f}%",
+              help="有购买会员数 ÷ 会员总数（购买在全局筛选范围内）")
+
+    if has_time:
+        st.divider()
+        st.markdown("##### 🆕 新会员 vs 老会员（购买表现）")
+        rows = []
+        for t in ["新会员", "老会员"]:
+            n_m = int((members["会员类型"] == t).sum())
+            sub = mo[mo["会员类型"] == t]
+            n_b = sub["user_id"].nunique()
+            rows.append({
+                "会员类型": t, "会员数": n_m,
+                "下单人数": n_b, "订单数": len(sub),
+                "GMV": round(float(sub["gmv"].sum()), 0),
+                "购买转化率(%)": round(n_b / n_m * 100, 2) if n_m else 0,
+                "客单价": round(float(sub["gmv"].sum()) / n_b, 0) if n_b else 0,
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        st.markdown("##### 📅 入会趋势（按入会月份）")
+        join_trend = (
+            members.dropna(subset=["join_time"])
+            .groupby("join_ym")["user_id"].nunique()
+            .rename("入会人数").reset_index().sort_values("join_ym")
+        )
+        fig = px.bar(join_trend, x="join_ym", y="入会人数", title="每月新增会员数",
+                     color_discrete_sequence=["#45B7D1"])
+        fig.update_layout(xaxis_title="入会月份", yaxis_title="入会人数", height=360)
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+    st.markdown("##### 👥 会员 vs 非会员（全局筛选范围内的下单用户）")
+    d = df.copy()
+    d["是否会员"] = "非会员"
+    d.loc[d["user_id"].isin(member_ids), "是否会员"] = "会员"
+    vs = (
+        d.groupby("是否会员")
+        .agg(下单人数=("user_id", "nunique"), 订单数=("gmv", "count"), GMV=("gmv", "sum"))
+        .reset_index()
+    )
+    vs["客单价"]   = (vs["GMV"] / vs["下单人数"].replace(0, 1)).round(0)
+    vs["购买频次"] = (vs["订单数"] / vs["下单人数"].replace(0, 1)).round(2)
+    vs["GMV"]      = vs["GMV"].round(0)
+    st.dataframe(vs, use_container_width=True, hide_index=True)
+    st.download_button(
+        "📥 下载会员/非会员对比 CSV",
+        data=vs.to_csv(index=False).encode("utf-8-sig"),
+        file_name="member_vs_nonmember.csv", mime="text/csv", key="mb_dl",
+    )
+
+
+def tab_crowd(df: pd.DataFrame):
+    """上传人群分析：人群id = 淘宝ID，与订单表匹配看各人群购买情况。
+    购买口径 = 左侧全局筛选。"""
+    st.subheader("上传人群 — 购买匹配")
+    st.caption(
+        "上传的人群（人群id = 淘宝ID）与订单表匹配，看各人群的后续购买情况；"
+        "**购买口径 = 左侧全局筛选**。"
+    )
+
+    try:
+        crowds = load_crowds()
+    except FileNotFoundError:
+        st.info(
+            "尚未生成人群数据。请把 `人群.xlsx`（含「人群名称」「淘宝ID」两列）放入 "
+            "`data/raw/` 后重新运行 `python preprocess.py`。"
+        )
+        return
+
+    all_crowds = sorted(crowds["crowd_name"].unique().tolist())
+    sel = st.multiselect(
+        "① 选择人群（可多选，不选 = 全部）", all_crowds, default=all_crowds, key="cr_sel",
+    )
+    use = crowds[crowds["crowd_name"].isin(sel)] if sel else crowds
+
+    all_ids  = set(use["user_id"])
+    sub_all  = df[df["user_id"].isin(all_ids)]
+    n_buyers = sub_all["user_id"].nunique()
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("人群人数（去重）", f"{len(all_ids):,}")
+    k2.metric("购买人数", f"{n_buyers:,}")
+    k3.metric("购买转化率", f"{(n_buyers / len(all_ids) * 100) if all_ids else 0:.2f}%",
+              help="购买人数 ÷ 人群去重人数（购买在全局筛选范围内）")
+    k4.metric("人群GMV", f"¥{float(sub_all['gmv'].sum()):,.0f}")
+
+    st.divider()
+    st.markdown("##### 📊 各人群购买对比")
+    rows = []
+    for name, grp in use.groupby("crowd_name"):
+        ids = set(grp["user_id"])
+        sub = df[df["user_id"].isin(ids)]
+        n_b = sub["user_id"].nunique()
+        rows.append({
+            "人群": name, "人群人数": len(ids),
+            "购买人数": n_b,
+            "购买转化率(%)": round(n_b / len(ids) * 100, 2) if ids else 0,
+            "订单数": len(sub),
+            "GMV": round(float(sub["gmv"].sum()), 0),
+            "客单价": round(float(sub["gmv"].sum()) / n_b, 0) if n_b else 0,
+        })
+    crowd_df = pd.DataFrame(rows).sort_values("人群人数", ascending=False)
+    st.dataframe(crowd_df, use_container_width=True, hide_index=True)
+
+    st.markdown("##### 🛍 人群购买货品（按货号）")
+    prod = (
+        sub_all.groupby("sku")
+        .agg(订单数=("gmv", "count"), 购买人数=("user_id", "nunique"), GMV=("gmv", "sum"))
+        .reset_index().rename(columns={"sku": "货号"})
+        .sort_values("订单数", ascending=False)
+    )
+    prod["GMV"] = prod["GMV"].round(0)
+    st.dataframe(prod.head(500), use_container_width=True, hide_index=True, height=360)
+
+    cda, cdb = st.columns(2)
+    cda.download_button(
+        "📥 下载人群对比 CSV", data=crowd_df.to_csv(index=False).encode("utf-8-sig"),
+        file_name="crowd_comparison.csv", mime="text/csv", key="cr_dl1",
+    )
+    cdb.download_button(
+        "📥 下载人群购买货品 CSV", data=prod.to_csv(index=False).encode("utf-8-sig"),
+        file_name="crowd_products.csv", mime="text/csv", key="cr_dl2",
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 主入口
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2141,7 +2335,7 @@ def main():
 
     pairs_filtered = filter_pairs(pairs, f)
 
-    t1, t2, t3, t4, t5, t6, t7, t8, t9 = st.tabs([
+    t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11 = st.tabs([
         "🏷 渠道汇总",
         "📈 新老客趋势",
         "📦 货品分析",
@@ -2150,6 +2344,8 @@ def main():
         "🔁 复购率",
         "⏱ 复购周期",
         "🧪 Sample回购",
+        "🪪 会员",
+        "👥 人群",
         "💰 平台优惠",
     ])
 
@@ -2170,6 +2366,10 @@ def main():
     with t8:
         tab_sample_repurchase(df)
     with t9:
+        tab_membership(df)
+    with t10:
+        tab_crowd(df)
+    with t11:
         tab_platform_discount(df)
 
 
