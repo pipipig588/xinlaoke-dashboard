@@ -1999,11 +1999,12 @@ def tab_sample_repurchase(df: pd.DataFrame):
 
     # ── 维度1：活动期间整体 KPI ──
     st.markdown("##### 📊 活动期间整体（按所选 sample 窗口）")
-    k1, k2, k3, k4 = st.columns(4)
+    k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("买样人数", f"{n_buyers:,}")
     k2.metric("回购人数", f"{n_repur_users:,}")
-    k3.metric("回购订单数", f"{n_repur_orders:,}", delta=f"回购GMV ¥{repur_gmv:,.0f}")
+    k3.metric("回购订单数", f"{n_repur_orders:,}")
     k4.metric("回购率", f"{repur_rate * 100:.2f}%", help="回购人数 ÷ 买样人数")
+    k5.metric("回购GMV", f"¥{repur_gmv:,.0f}")
 
     st.divider()
 
