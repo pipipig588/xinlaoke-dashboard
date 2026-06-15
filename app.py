@@ -47,6 +47,14 @@ def load_meta() -> dict:
         return json.load(f)
 
 
+@st.cache_data
+def load_samples() -> pd.DataFrame:
+    df = pd.read_parquet("data/processed/samples.parquet")
+    df["pay_time"]   = pd.to_datetime(df["pay_time"])
+    df["order_date"] = pd.to_datetime(df["order_date"])
+    return df
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 侧边栏筛选
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -478,12 +486,12 @@ def render_kpi(df: pd.DataFrame, df_yoy: pd.DataFrame = None):
 # Tab：渠道汇总（自营/达人占比 + 同比 + 分渠道明细表）
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _channel_agg(df: pd.DataFrame) -> pd.DataFrame:
-    """按 channel_type 汇总：订单数 / GMV / 人数 / 新老客拆分"""
-    if df is None or df.empty or "channel_type" not in df.columns:
+def _channel_agg(df: pd.DataFrame, group_col: str = "channel_type") -> pd.DataFrame:
+    """按指定列汇总：订单数 / GMV / 人数 / 新老客拆分"""
+    if df is None or df.empty or group_col not in df.columns:
         return pd.DataFrame()
 
-    base = df.groupby("channel_type").agg(
+    base = df.groupby(group_col).agg(
         订单数=("gmv", "count"),
         GMV=("gmv", "sum"),
         人数=("user_id", "nunique"),
@@ -492,113 +500,137 @@ def _channel_agg(df: pd.DataFrame) -> pd.DataFrame:
     new_df = df[df["customer_type"] == "新客"]
     old_df = df[df["customer_type"] == "老客"]
 
-    new_agg = new_df.groupby("channel_type").agg(
+    new_agg = new_df.groupby(group_col).agg(
         新客订单=("gmv", "count"),
         新客GMV=("gmv", "sum"),
         新客人数=("user_id", "nunique"),
     ).reset_index()
-    old_agg = old_df.groupby("channel_type").agg(
+    old_agg = old_df.groupby(group_col).agg(
         老客订单=("gmv", "count"),
         老客GMV=("gmv", "sum"),
         老客人数=("user_id", "nunique"),
     ).reset_index()
 
-    out = base.merge(new_agg, on="channel_type", how="left") \
-              .merge(old_agg, on="channel_type", how="left").fillna(0)
+    out = base.merge(new_agg, on=group_col, how="left") \
+              .merge(old_agg, on=group_col, how="left").fillna(0)
 
     out["客单价"]    = (out["GMV"] / out["人数"].replace(0, 1)).round(0)
     out["购买频次"]  = (out["订单数"] / out["人数"].replace(0, 1)).round(2)
     out["新客占比%"] = (out["新客人数"] / out["人数"].replace(0, 1) * 100).round(1)
     out["老客占比%"] = (out["老客人数"] / out["人数"].replace(0, 1) * 100).round(1)
+    out["新客客单"]  = (out["新客GMV"] / out["新客人数"].replace(0, 1)).round(0)
+    out["老客客单"]  = (out["老客GMV"] / out["老客人数"].replace(0, 1)).round(0)
     return out
 
 
 _CHANNEL_COLORS = {"自营": "#FF6B6B", "达人": "#4ECDC4"}
 
 
-def _donut(agg: pd.DataFrame, metric: str, title: str, fmt: str = "num") -> go.Figure:
-    """给定渠道汇总表和指标列名，画环形图。fmt: num / gmv"""
-    if agg.empty or metric not in agg.columns:
+def _donut(agg: pd.DataFrame, group_col: str, metric: str,
+           title: str, fmt: str = "num", legend_label: str = "渠道") -> go.Figure:
+    """给定汇总表、分组列、指标列名，画环形图。"""
+    if agg.empty or metric not in agg.columns or group_col not in agg.columns:
         fig = go.Figure()
         fig.add_annotation(text="（无数据）", showarrow=False, font=dict(size=14, color="#888"))
         fig.update_layout(title=title, height=360, margin=dict(t=50, b=20, l=10, r=10))
         return fig
 
-    labels = agg["channel_type"].tolist()
+    labels = agg[group_col].astype(str).tolist()
     values = agg[metric].tolist()
-    colors = [_CHANNEL_COLORS.get(l, "#999") for l in labels]
+
+    # 渠道类型用固定红绿；其他维度用 plotly 默认彩色
+    if group_col == "channel_type":
+        colors = [_CHANNEL_COLORS.get(l, "#999") for l in labels]
+        marker_kw = dict(colors=colors, line=dict(color="white", width=2))
+    else:
+        marker_kw = dict(line=dict(color="white", width=2))
 
     if fmt == "gmv":
         text_vals = [f"¥{v:,.0f}" for v in values]
-        hover_fmt = "渠道：%{label}<br>金额：¥%{value:,.0f}<br>占比：%{percent}<extra></extra>"
+        hover_fmt = f"{legend_label}：%{{label}}<br>金额：¥%{{value:,.0f}}<br>占比：%{{percent}}<extra></extra>"
     else:
         text_vals = [f"{int(v):,}" for v in values]
-        hover_fmt = "渠道：%{label}<br>数量：%{value:,}<br>占比：%{percent}<extra></extra>"
+        hover_fmt = f"{legend_label}：%{{label}}<br>数量：%{{value:,}}<br>占比：%{{percent}}<extra></extra>"
 
     fig = go.Figure(go.Pie(
         labels=labels,
         values=values,
         hole=0.55,
-        marker=dict(colors=colors, line=dict(color="white", width=2)),
+        marker=marker_kw,
         text=text_vals,
         textinfo="label+percent+text",
         texttemplate="%{label}<br>%{percent}<br>%{text}",
         hovertemplate=hover_fmt,
         sort=False,
     ))
+    # 维度多时把名字放到图例，避免图上文字挤
+    show_legend = (group_col != "channel_type" and len(labels) > 3)
+    if show_legend:
+        fig.update_traces(textinfo="percent+text", texttemplate="%{percent}<br>%{text}")
     fig.update_layout(
         title=title,
         height=360,
         margin=dict(t=50, b=20, l=10, r=10),
-        showlegend=False,
+        showlegend=show_legend,
+        legend=dict(orientation="v", yanchor="middle", y=0.5, xanchor="left", x=1.02),
     )
     return fig
 
 
 def tab_channel_summary(df: pd.DataFrame, df_yoy: pd.DataFrame, yoy_on: bool, f: dict):
-    st.subheader("渠道汇总（自营 / 达人）")
-    st.caption("时间范围内的渠道整体占比与分渠道关键指标（受全局筛选影响）。")
+    st.subheader("渠道汇总")
+    st.caption("时间范围内的整体占比与分维度关键指标（受全局筛选影响）。")
 
-    cur = _channel_agg(df)
+    # ── 决定分组维度：选了达人 → 按达人；否则按渠道类型 ──
+    if f.get("sel_influencers"):
+        group_col   = "influencer_name"
+        group_label = "达人"
+        section_title = f"📊 各达人占比（共 {len(f['sel_influencers'])} 位）"
+    else:
+        group_col   = "channel_type"
+        group_label = "渠道类型"
+        section_title = "📊 渠道类型占比（自营 / 达人）"
+
+    cur = _channel_agg(df, group_col)
     if cur.empty:
-        st.info("当前筛选条件下没有可统计的渠道数据。")
+        st.info("当前筛选条件下没有可统计的数据。")
         return
 
     has_yoy = yoy_on and df_yoy is not None and not df_yoy.empty
-    yoy = _channel_agg(df_yoy) if has_yoy else pd.DataFrame()
+    yoy = _channel_agg(df_yoy, group_col) if has_yoy else pd.DataFrame()
 
-    st.markdown("#### 📊 渠道占比")
+    st.markdown(f"#### {section_title}")
     if has_yoy:
         st.caption(f"上排：当期（{f['date_range'][0]} ~ {f['date_range'][1]}） · 下排：同比（{f['yoy_date_range'][0]} ~ {f['yoy_date_range'][1]}）")
 
     c1, c2, c3 = st.columns(3)
-    c1.plotly_chart(_donut(cur, "订单数", "订单数占比"),    use_container_width=True)
-    c2.plotly_chart(_donut(cur, "GMV",   "GMV占比", "gmv"), use_container_width=True)
-    c3.plotly_chart(_donut(cur, "人数",   "去重买家数占比"), use_container_width=True)
+    c1.plotly_chart(_donut(cur, group_col, "订单数", "订单数占比",       "num", group_label), use_container_width=True)
+    c2.plotly_chart(_donut(cur, group_col, "GMV",   "GMV占比",          "gmv", group_label), use_container_width=True)
+    c3.plotly_chart(_donut(cur, group_col, "人数",  "去重买家数占比",   "num", group_label), use_container_width=True)
 
     if has_yoy:
         y1, y2, y3 = st.columns(3)
-        y1.plotly_chart(_donut(yoy, "订单数", "订单数占比（同比）"),    use_container_width=True)
-        y2.plotly_chart(_donut(yoy, "GMV",   "GMV占比（同比）", "gmv"), use_container_width=True)
-        y3.plotly_chart(_donut(yoy, "人数",   "去重买家数占比（同比）"), use_container_width=True)
+        y1.plotly_chart(_donut(yoy, group_col, "订单数", "订单数占比（同比）",     "num", group_label), use_container_width=True)
+        y2.plotly_chart(_donut(yoy, group_col, "GMV",   "GMV占比（同比）",        "gmv", group_label), use_container_width=True)
+        y3.plotly_chart(_donut(yoy, group_col, "人数",  "去重买家数占比（同比）", "num", group_label), use_container_width=True)
 
     st.divider()
 
-    st.markdown("#### 📋 分渠道关键指标")
+    st.markdown(f"#### 📋 分{group_label}关键指标")
 
     cols_order = [
-        "channel_type", "订单数", "人数", "GMV", "客单价", "购买频次",
+        group_col, "订单数", "人数", "GMV", "客单价", "购买频次",
         "新客人数", "老客人数", "新客占比%", "老客占比%",
-        "新客订单", "老客订单", "新客GMV", "老客GMV",
+        "新客客单", "老客客单", "新客GMV", "老客GMV",
     ]
     cur_show = cur[[c for c in cols_order if c in cur.columns]].copy()
-    cur_show = cur_show.rename(columns={"channel_type": "渠道类型"})
+    cur_show = cur_show.rename(columns={group_col: group_label})
 
     fmt_map = {
         "订单数": "{:,.0f}", "人数": "{:,.0f}",
         "新客人数": "{:,.0f}", "老客人数": "{:,.0f}",
-        "新客订单": "{:,.0f}", "老客订单": "{:,.0f}",
         "GMV": "¥{:,.0f}", "客单价": "¥{:,.0f}",
+        "新客客单": "¥{:,.0f}", "老客客单": "¥{:,.0f}",
         "新客GMV": "¥{:,.0f}", "老客GMV": "¥{:,.0f}",
         "购买频次": "{:.2f}",
         "新客占比%": "{:.1f}%", "老客占比%": "{:.1f}%",
@@ -606,26 +638,25 @@ def tab_channel_summary(df: pd.DataFrame, df_yoy: pd.DataFrame, yoy_on: bool, f:
 
     if has_yoy:
         yoy_show = yoy[[c for c in cols_order if c in yoy.columns]].copy()
-        yoy_show = yoy_show.rename(columns={"channel_type": "渠道类型"})
-        yoy_show["渠道类型"] = yoy_show["渠道类型"].astype(str) + "（同比）"
+        yoy_show = yoy_show.rename(columns={group_col: group_label})
+        yoy_show[group_label] = yoy_show[group_label].astype(str) + "（同比）"
 
         combined = pd.concat([cur_show, yoy_show], ignore_index=True)
 
         def shade_yoy(row):
-            return ["background-color: #f0f4f8"] * len(row) if "同比" in str(row["渠道类型"]) else [""] * len(row)
+            return ["background-color: #f0f4f8"] * len(row) if "同比" in str(row[group_label]) else [""] * len(row)
 
         styled = combined.style.format(fmt_map).apply(shade_yoy, axis=1)
         st.dataframe(styled, use_container_width=True, hide_index=True)
 
         st.markdown("##### 同比变化（当期 vs 同比时段）")
         merged = cur.merge(
-            yoy, on="channel_type", how="outer", suffixes=("_当期", "_同比")
+            yoy, on=group_col, how="outer", suffixes=("_当期", "_同比")
         ).fillna(0)
 
         delta_rows = []
         for _, r in merged.iterrows():
-            ct = r["channel_type"]
-            row = {"渠道类型": ct}
+            row = {group_label: r[group_col]}
             for k in ["订单数", "人数", "GMV", "客单价"]:
                 cur_v  = r.get(f"{k}_当期", 0)
                 yoy_v  = r.get(f"{k}_同比", 0)
@@ -649,7 +680,7 @@ def tab_channel_summary(df: pd.DataFrame, df_yoy: pd.DataFrame, yoy_on: bool, f:
 
         styled_delta = delta_df.style
         for c in delta_df.columns:
-            if c != "渠道类型":
+            if c != group_label:
                 styled_delta = styled_delta.applymap(color_delta, subset=[c])
         st.dataframe(styled_delta, use_container_width=True, hide_index=True)
     else:
@@ -901,7 +932,7 @@ def tab_product(df: pd.DataFrame):
 
     c1, c2 = st.columns([2, 1])
     sku_kw2 = c1.text_input("货号关键词过滤（仅此图表）", "", key="sku_kw2")
-    metric  = c2.radio("指标", ["订单数", "GMV（元）"], horizontal=True, key="prod_metric")
+    metric  = c2.radio("指标", ["GMV（元）", "人数"], horizontal=True, key="prod_metric")
 
     if sku_kw2:
         df = df[df["sku"].str.contains(sku_kw2, case=False, na=False)]
@@ -911,14 +942,16 @@ def tab_product(df: pd.DataFrame):
         return
 
     use_gmv = "GMV" in metric
-    total_store = df["gmv"].sum() if use_gmv else len(df)
+    metric_label = "GMV（元）" if use_gmv else "人数"
 
     if use_gmv:
-        sku_grp   = df.groupby(["sku", "customer_type"])["gmv"].sum().reset_index(name="value")
-        sku_total = df.groupby("sku")["gmv"].sum().reset_index(name="total")
+        total_store = df["gmv"].sum()
+        sku_grp     = df.groupby(["sku", "customer_type"])["gmv"].sum().reset_index(name="value")
+        sku_total   = df.groupby("sku")["gmv"].sum().reset_index(name="total")
     else:
-        sku_grp   = df.groupby(["sku", "customer_type"]).size().reset_index(name="value")
-        sku_total = df.groupby("sku").size().reset_index(name="total")
+        total_store = df["user_id"].nunique()
+        sku_grp     = df.groupby(["sku", "customer_type"])["user_id"].nunique().reset_index(name="value")
+        sku_total   = df.groupby("sku")["user_id"].nunique().reset_index(name="total")
 
     sku_total = sku_total.sort_values("total", ascending=False)
     sku_order = sku_total["sku"].tolist()
@@ -932,11 +965,33 @@ def tab_product(df: pd.DataFrame):
     sku_pivot["老客_pct"] = sku_pivot["老客"] / sku_pivot["total"].replace(0, 1) * 100
     sku_pivot = sku_pivot.reindex(sku_order)
 
-    metric_label = "GMV（元）" if use_gmv else "订单数"
-
-    col_left, col_right = st.columns([3, 2])
+    # ── 左：排名 & 全店占比；右：新老客占比 ──
+    col_left, col_right = st.columns([2, 3])
 
     with col_left:
+        st.markdown(f"**{metric_label}排名 & 全店占比**")
+        display_df = sku_total.head(50).copy()
+        display_df["全店占比(%)"] = (display_df["total"] / total_store * 100).round(2) if total_store else 0
+        fig2 = go.Figure(go.Bar(
+            y=display_df["sku"],
+            x=display_df["total"],
+            orientation="h",
+            marker_color="#6C8EBF",
+            text=[
+                f"{v:,.0f}  ({p:.1f}%)"
+                for v, p in zip(display_df["total"], display_df["全店占比(%)"])
+            ],
+            textposition="outside",
+            hovertemplate="货号: %{y}<br>数值: %{x:,.0f}<extra></extra>",
+        ))
+        fig2.update_layout(
+            height=max(350, len(display_df) * 28 + 120),
+            xaxis_title=metric_label,
+            yaxis=dict(title="货号", autorange="reversed"),
+        )
+        st.plotly_chart(fig2, use_container_width=True)
+
+    with col_right:
         st.markdown("**各货号新老客占比（%）**")
         fig1 = go.Figure()
         for ct, color in [("新客", "#FF6B6B"), ("老客", "#4ECDC4")]:
@@ -959,46 +1014,56 @@ def tab_product(df: pd.DataFrame):
         )
         st.plotly_chart(fig1, use_container_width=True)
 
-    with col_right:
-        st.markdown(f"**{metric_label}排名 & 全店占比**")
-        display_df = sku_total.head(50).copy()
-        display_df["全店占比(%)"] = (display_df["total"] / total_store * 100).round(2)
-        fig2 = go.Figure(go.Bar(
-            y=display_df["sku"],
-            x=display_df["total"],
-            orientation="h",
-            marker_color="#6C8EBF",
-            text=[
-                f"{v:,.0f}  ({p:.1f}%)"
-                for v, p in zip(display_df["total"], display_df["全店占比(%)"])
-            ],
-            textposition="outside",
-            hovertemplate="货号: %{y}<br>数值: %{x:,.0f}<extra></extra>",
-        ))
-        fig2.update_layout(
-            height=max(350, len(display_df) * 28 + 120),
-            xaxis_title=metric_label,
-            yaxis=dict(title="货号", autorange="reversed"),
-        )
-        st.plotly_chart(fig2, use_container_width=True)
-
+    # ── 下载表：一次同时含 GMV 和 人数 两套指标 ──
     st.markdown("#### 📥 货品明细数据（可下载）")
-    download_df = sku_total.copy()
-    download_df.columns = ["货号", metric_label]
-    download_df["全店占比(%)"] = (download_df[metric_label] / total_store * 100).round(2)
-    download_df = download_df.merge(
-        sku_pivot[["新客", "老客", "新客_pct", "老客_pct"]].reset_index(),
-        left_on="货号", right_on="sku", how="left"
-    ).drop(columns=["sku"])
-    download_df = download_df.rename(columns={"新客_pct": "新客占比(%)", "老客_pct": "老客占比(%)"})
 
-    st.dataframe(download_df, use_container_width=True, hide_index=True)
+    gmv_total_store   = df["gmv"].sum()
+    ppl_total_store   = df["user_id"].nunique()
 
-    csv_bytes = download_df.to_csv(index=False).encode("utf-8-sig")
+    gmv_total = df.groupby("sku")["gmv"].sum().reset_index(name="GMV（元）")
+    ppl_total = df.groupby("sku")["user_id"].nunique().reset_index(name="人数")
+
+    gmv_new = df[df["customer_type"] == "新客"].groupby("sku")["gmv"].sum().reset_index(name="新客GMV")
+    gmv_old = df[df["customer_type"] == "老客"].groupby("sku")["gmv"].sum().reset_index(name="老客GMV")
+    ppl_new = df[df["customer_type"] == "新客"].groupby("sku")["user_id"].nunique().reset_index(name="新客人数")
+    ppl_old = df[df["customer_type"] == "老客"].groupby("sku")["user_id"].nunique().reset_index(name="老客人数")
+
+    full = gmv_total.merge(ppl_total, on="sku", how="outer") \
+                    .merge(gmv_new, on="sku", how="left") \
+                    .merge(gmv_old, on="sku", how="left") \
+                    .merge(ppl_new, on="sku", how="left") \
+                    .merge(ppl_old, on="sku", how="left").fillna(0)
+
+    full["GMV全店占比(%)"]  = (full["GMV（元）"] / gmv_total_store * 100).round(2) if gmv_total_store else 0
+    full["人数全店占比(%)"] = (full["人数"]      / ppl_total_store * 100).round(2) if ppl_total_store else 0
+    full["GMV新客占比(%)"]  = (full["新客GMV"]   / full["GMV（元）"].replace(0, 1) * 100).round(2)
+    full["GMV老客占比(%)"]  = (full["老客GMV"]   / full["GMV（元）"].replace(0, 1) * 100).round(2)
+    full["人数新客占比(%)"] = (full["新客人数"]  / full["人数"].replace(0, 1)      * 100).round(2)
+    full["人数老客占比(%)"] = (full["老客人数"]  / full["人数"].replace(0, 1)      * 100).round(2)
+
+    full = full.rename(columns={"sku": "货号"})
+    sort_col = "GMV（元）" if use_gmv else "人数"
+    full = full.sort_values(sort_col, ascending=False).reset_index(drop=True)
+
+    cols_order = [
+        "货号",
+        "GMV（元）", "GMV全店占比(%)", "新客GMV", "老客GMV", "GMV新客占比(%)", "GMV老客占比(%)",
+        "人数",      "人数全店占比(%)", "新客人数", "老客人数", "人数新客占比(%)", "人数老客占比(%)",
+    ]
+    full = full[[c for c in cols_order if c in full.columns]]
+
+    int_cols = ["GMV（元）", "新客GMV", "老客GMV", "人数", "新客人数", "老客人数"]
+    for c in int_cols:
+        if c in full.columns:
+            full[c] = full[c].round(0).astype(int)
+
+    st.dataframe(full, use_container_width=True, hide_index=True)
+
+    csv_bytes = full.to_csv(index=False).encode("utf-8-sig")
     st.download_button(
-        label="⬇️ 下载 CSV",
+        label="⬇️ 下载 CSV（含 GMV + 人数 全套指标）",
         data=csv_bytes,
-        file_name=f"货品分析_{metric_label}.csv",
+        file_name="货品分析_GMV+人数.csv",
         mime="text/csv",
     )
 
@@ -1311,6 +1376,258 @@ def tab_repurchase_rate(df: pd.DataFrame, pairs: pd.DataFrame):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Tab：RFM 模型（CRM）
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# R 桶定义：标签 → (下界天, 上界天)，区间为 (lower, upper]
+_R_BUCKETS = [
+    ("0-30天",    0, 30),
+    ("30-60天",   30, 60),
+    ("60-90天",   60, 90),
+    ("90-180天",  90, 180),
+    ("180-365天", 180, 365),
+    ("365+天",    365, None),
+]
+_F_BUCKETS = [
+    ("1次",    1, 1),
+    ("2次",    2, 2),
+    ("3-5次",  3, 5),
+    ("6-10次", 6, 10),
+    ("10+次",  11, None),
+]
+_M_BUCKETS = [
+    ("¥0-500",        0,     500),
+    ("¥500-2000",     500,   2000),
+    ("¥2000-5000",    2000,  5000),
+    ("¥5000-10000",   5000,  10000),
+    ("¥10000+",       10000, None),
+]
+
+
+def _r_date_range(label: str, cutoff: pd.Timestamp) -> str:
+    lo, hi = next((l, h) for lab, l, h in _R_BUCKETS if lab == label)
+    if hi is None:
+        end = cutoff - pd.Timedelta(days=lo)
+        return f"≤ {end.strftime('%Y-%m-%d')}"
+    start = cutoff - pd.Timedelta(days=hi) + pd.Timedelta(days=1)
+    end   = cutoff - pd.Timedelta(days=lo)
+    return f"{start.strftime('%Y-%m-%d')} ~ {end.strftime('%Y-%m-%d')}"
+
+
+def _bucket_label(v: float, buckets: list) -> str:
+    for label, lo, hi in buckets:
+        if hi is None:
+            if v >= lo:
+                return label
+        else:
+            if lo <= v <= hi:
+                return label
+            # 兼容 (lo, hi] 形式（R 桶用此）
+            if lo < v <= hi:
+                return label
+    return buckets[-1][0]
+
+
+def _r_bucket_label(days: float) -> str:
+    """R 桶按 (下界, 上界] 区间分配，最短桶优先（去重）"""
+    for label, lo, hi in _R_BUCKETS:
+        if hi is None:
+            if days > lo:
+                return label
+        else:
+            if days <= hi and (lo == 0 or days > lo):
+                return label
+    return _R_BUCKETS[-1][0]
+
+
+def tab_rfm(df: pd.DataFrame, orders_all: pd.DataFrame, f: dict):
+    st.subheader("📐 RFM 模型（CRM 用）")
+    st.caption(
+        "**回购窗口 = 全局筛选「时间范围」**；**分析截止日 = 时间范围开始日的前一天**（R 桶从此日往前推算）。"
+        "R=最近一次购买距截止日天数；F=截止日前累计订单数；M=截止日前累计 GMV。"
+        "每个用户**只计入一次**：R 桶按最近购买日划分（若落入 0-30 桶，则不再计入 30-60 桶）。"
+    )
+
+    if not f.get("date_range") or len(f["date_range"]) != 2:
+        st.info("请在左侧选择有效的时间范围。")
+        return
+
+    repurch_start_ts = pd.Timestamp(f["date_range"][0])
+    repurch_end_ts   = pd.Timestamp(f["date_range"][1])
+    cutoff_ts        = repurch_start_ts - pd.Timedelta(days=1)
+    repurch_days     = (repurch_end_ts - repurch_start_ts).days + 1
+
+    st.markdown(
+        f"📅 回购窗口：**{repurch_start_ts.strftime('%Y-%m-%d')} ~ {repurch_end_ts.strftime('%Y-%m-%d')}**（{repurch_days} 天）"
+        f"　·　分析截止日：**{cutoff_ts.strftime('%Y-%m-%d')}**"
+    )
+
+    # ── 截止日前的全量行为：不受时间范围限制，但其他筛选保留 ──
+    # 用 orders_all（全量订单）+ 重新跑除"时间范围"以外的过滤
+    f_no_date = dict(f)
+    f_no_date["date_range"] = ()  # 关掉时间范围过滤
+    history = _base_filter(orders_all, f_no_date, ())
+    df_before = history[history["pay_time"] <= cutoff_ts]
+    if df_before.empty:
+        st.info("分析截止日之前没有数据，请调整截止日或筛选条件。")
+        return
+
+    user_summary = df_before.groupby("user_id").agg(
+        last_pay=("pay_time", "max"),
+        order_count=("pay_time", "count"),
+        total_gmv=("gmv", "sum"),
+    ).reset_index()
+    user_summary["R_days"] = (cutoff_ts - user_summary["last_pay"]).dt.days
+
+    # 回购：cutoff < pay_time <= repurch_end
+    df_repurch = df[(df["pay_time"] > cutoff_ts) & (df["pay_time"] <= repurch_end_ts)]
+    repurch_users = set(df_repurch["user_id"].unique())
+    user_summary["is_repurch"] = user_summary["user_id"].isin(repurch_users).astype(int)
+
+    # 分桶
+    user_summary["R_bucket"] = user_summary["R_days"].apply(_r_bucket_label)
+    user_summary["F_bucket"] = user_summary["order_count"].apply(lambda x: _bucket_label(x, _F_BUCKETS))
+    user_summary["M_bucket"] = user_summary["total_gmv"].apply(lambda x: _bucket_label(x, _M_BUCKETS))
+
+    def render_dim(col: str, label: str, bucket_order: list, with_date: bool = False):
+        agg = (
+            user_summary.groupby(col)
+            .agg(老客基数=("user_id", "count"), 回购人数=("is_repurch", "sum"))
+            .reindex(bucket_order, fill_value=0)
+            .reset_index()
+            .rename(columns={col: label})
+        )
+        agg["回购率(%)"] = (agg["回购人数"] / agg["老客基数"].replace(0, 1) * 100).round(2)
+
+        if with_date:
+            agg.insert(1, "日期范围", agg[label].apply(lambda lab: _r_date_range(lab, cutoff_ts)))
+
+        total = {
+            label: "TTL",
+            "老客基数": int(agg["老客基数"].sum()),
+            "回购人数": int(agg["回购人数"].sum()),
+            "回购率(%)": round(agg["回购人数"].sum() / agg["老客基数"].sum() * 100, 2) if agg["老客基数"].sum() else 0,
+        }
+        if with_date:
+            total["日期范围"] = "—"
+        agg = pd.concat([agg, pd.DataFrame([total])], ignore_index=True)
+        return agg
+
+    # ── R 表 ──
+    st.markdown(f"#### 🕐 R — 最近购买距 **{cutoff_ts.strftime('%Y-%m-%d')}** 天数")
+    r_order = [b[0] for b in _R_BUCKETS]
+    r_table = render_dim("R_bucket", "R 桶", r_order, with_date=True)
+    fmt = {"老客基数": "{:,.0f}", "回购人数": "{:,.0f}", "回购率(%)": "{:.2f}%"}
+    def highlight_ttl(row, label):
+        return ["background-color:#fff4e6;font-weight:600" if str(row[label]) == "TTL" else ""] * len(row)
+    st.dataframe(
+        r_table.style.format(fmt).apply(lambda r: highlight_ttl(r, "R 桶"), axis=1),
+        use_container_width=True, hide_index=True,
+    )
+
+    # ── R 桶回购率柱状图 ──
+    r_chart = r_table[r_table["R 桶"] != "TTL"]
+    if not r_chart.empty:
+        fig_r = px.bar(
+            r_chart, x="R 桶", y="回购率(%)",
+            text="回购率(%)", color="老客基数",
+            color_continuous_scale="Blues",
+            labels={"R 桶": "R（最近购买距今）", "回购率(%)": "回购率 (%)"},
+            height=320, title="各 R 桶的回购率对比",
+        )
+        fig_r.update_traces(texttemplate="%{text:.2f}%", textposition="outside")
+        st.plotly_chart(fig_r, use_container_width=True)
+
+    st.divider()
+
+    # ── F 表 ──
+    st.markdown("#### 🔁 F — 截止日前累计订单数")
+    f_order = [b[0] for b in _F_BUCKETS]
+    f_table = render_dim("F_bucket", "F 桶", f_order)
+    st.dataframe(
+        f_table.style.format(fmt).apply(lambda r: highlight_ttl(r, "F 桶"), axis=1),
+        use_container_width=True, hide_index=True,
+    )
+
+    st.divider()
+
+    # ── M 表 ──
+    st.markdown("#### 💰 M — 截止日前累计 GMV")
+    m_order = [b[0] for b in _M_BUCKETS]
+    m_table = render_dim("M_bucket", "M 桶", m_order)
+    st.dataframe(
+        m_table.style.format(fmt).apply(lambda r: highlight_ttl(r, "M 桶"), axis=1),
+        use_container_width=True, hide_index=True,
+    )
+
+    st.divider()
+
+    # ── R×F 交叉透视（回购率）──
+    st.markdown("#### 🧊 R × F 回购率交叉透视")
+    st.caption("行=R 桶，列=F 桶；数值=回购率 (%)；hover 显示基数/回购人数。")
+    cross = (
+        user_summary.groupby(["R_bucket", "F_bucket"])
+        .agg(基数=("user_id", "count"), 回购=("is_repurch", "sum"))
+        .reset_index()
+    )
+    cross["回购率"] = (cross["回购"] / cross["基数"].replace(0, 1) * 100).round(2)
+    cross["R_bucket"] = pd.Categorical(cross["R_bucket"], categories=r_order, ordered=True)
+    cross["F_bucket"] = pd.Categorical(cross["F_bucket"], categories=f_order, ordered=True)
+
+    rate_pivot = cross.pivot(index="R_bucket", columns="F_bucket", values="回购率").reindex(r_order)[f_order]
+    base_pivot = cross.pivot(index="R_bucket", columns="F_bucket", values="基数").reindex(r_order)[f_order]
+    repu_pivot = cross.pivot(index="R_bucket", columns="F_bucket", values="回购").reindex(r_order)[f_order]
+
+    custom = []
+    for i in range(len(rate_pivot.index)):
+        row = []
+        for j in range(len(rate_pivot.columns)):
+            row.append([base_pivot.values[i][j], repu_pivot.values[i][j]])
+        custom.append(row)
+
+    fig_x = go.Figure(go.Heatmap(
+        z=rate_pivot.values,
+        x=rate_pivot.columns.tolist(),
+        y=rate_pivot.index.tolist(),
+        colorscale="YlOrRd",
+        text=[[f"{v:.1f}%" if pd.notna(v) else "" for v in row] for row in rate_pivot.values],
+        texttemplate="%{text}",
+        customdata=custom,
+        hovertemplate="R=%{y}<br>F=%{x}<br>回购率 %{z:.2f}%<br>基数 %{customdata[0]:,}<br>回购 %{customdata[1]:,}<extra></extra>",
+        colorbar=dict(title="回购率(%)"),
+    ))
+    fig_x.update_layout(
+        height=380,
+        xaxis_title="F 桶（订单数）",
+        yaxis_title="R 桶（最近购买距今）",
+        yaxis=dict(autorange="reversed"),
+    )
+    st.plotly_chart(fig_x, use_container_width=True)
+
+    # ── 用户级明细下载 ──
+    with st.expander("📥 用户级 RFM 明细（可下载）"):
+        out = user_summary.rename(columns={
+            "user_id": "用户ID",
+            "last_pay": "最近购买时间",
+            "order_count": "累计订单数",
+            "total_gmv": "累计GMV",
+            "R_days": "R(天)",
+            "is_repurch": "是否回购",
+        }).copy()
+        out["累计GMV"] = out["累计GMV"].round(2)
+        st.caption(f"共 {len(out):,} 个用户，下方表格显示前 500 行。")
+        st.dataframe(out.head(500), use_container_width=True, hide_index=True)
+        csv_bytes = out.to_csv(index=False).encode("utf-8-sig")
+        st.download_button(
+            "⬇️ 下载用户级 RFM 明细 CSV",
+            data=csv_bytes,
+            file_name=f"RFM_用户明细_cutoff_{cutoff_ts.strftime('%Y%m%d')}.csv",
+            mime="text/csv",
+            key="rfm_user_dl",
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Tab 5：渠道流转 Sankey
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1606,6 +1923,155 @@ def tab_platform_discount(df: pd.DataFrame):
     )
 
 
+def tab_sample_repurchase(df: pd.DataFrame):
+    """Sample（低价试用装）回购分析。
+
+    回购定义：买过 sample 的顾客，之后（或同时）购买正装即算回购，
+    即正装支付时间 ≥ 该顾客在所选 sample 窗口内最早一次买样时间。
+    回购时间口径 = 左侧全局时间筛选（df 已是全局筛选后的正装订单）。
+    """
+    st.subheader("Sample 回购分析 — 试用装转正装")
+    st.caption(
+        "买过低价试用装（sample）的顾客，之后或同时购买**正装**即视为回购"
+        "（正装购买时间不得早于买样时间）。**回购时间口径 = 左侧全局筛选**；"
+        "下方三个筛选只作用于 sample（活动期间）。"
+    )
+
+    try:
+        samples = load_samples()
+    except FileNotFoundError:
+        st.info(
+            "尚未生成派样数据。请把 `派样.xlsx` 放入 `data/raw/` 后重新运行 "
+            "`python preprocess.py`。"
+        )
+        return
+
+    # ── Sample 专属筛选（3 个，独立于左侧全局筛选）──
+    s_min, s_max = samples["pay_time"].min().date(), samples["pay_time"].max().date()
+    c1, c2, c3 = st.columns([2, 2, 2])
+    with c1:
+        s_date = st.date_input(
+            "① Sample 购买时间（活动期间）",
+            value=(s_min, s_max), min_value=s_min, max_value=s_max,
+            key="smp_date",
+        )
+    with c2:
+        status_opts = sorted(samples["order_status"].unique().tolist())
+        s_status = st.multiselect(
+            "② Sample 订单状态", status_opts, default=status_opts, key="smp_status",
+        )
+    with c3:
+        sku_opts = sorted(samples["sku"].unique().tolist())
+        s_sku = st.multiselect(
+            "③ Sample 货号", sku_opts, default=[], key="smp_sku",
+            help="留空 = 全部货号。注：当前派样表货号大多为空，后续补充货号值后此处即可精确筛选。",
+        )
+
+    # 解析日期范围（date_input 选一个值时返回单值）
+    if isinstance(s_date, (tuple, list)) and len(s_date) == 2:
+        sd0, sd1 = s_date
+    else:
+        sd0 = sd1 = s_date if not isinstance(s_date, (tuple, list)) else s_date[0]
+
+    smask = (samples["pay_time"].dt.date >= sd0) & (samples["pay_time"].dt.date <= sd1)
+    if s_status:
+        smask &= samples["order_status"].isin(s_status)
+    if s_sku:
+        smask &= samples["sku"].isin(s_sku)
+    smp = samples[smask]
+
+    if smp.empty:
+        st.warning("⚠️ 当前 sample 筛选条件下没有买样记录，请放宽条件。")
+        return
+
+    # 每个用户在所选窗口内「最早一次买样时间」作为回购门槛
+    first_smp = smp.groupby("user_id")["pay_time"].min().rename("smp_time").reset_index()
+    n_buyers = len(first_smp)
+
+    # 回购 = 全局筛选后的正装订单中，买样用户且正装时间 ≥ 其最早买样时间
+    o = df[["user_id", "pay_time", "sku", "gmv"]].merge(first_smp, on="user_id", how="inner")
+    repur = o[o["pay_time"] >= o["smp_time"]].copy()
+
+    n_repur_orders = len(repur)
+    n_repur_users  = repur["user_id"].nunique()
+    repur_rate     = (n_repur_users / n_buyers) if n_buyers else 0.0
+    repur_gmv      = float(repur["gmv"].sum())
+
+    # ── 维度1：活动期间整体 KPI ──
+    st.markdown("##### 📊 活动期间整体（按所选 sample 窗口）")
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("买样人数", f"{n_buyers:,}")
+    k2.metric("回购人数", f"{n_repur_users:,}")
+    k3.metric("回购订单数", f"{n_repur_orders:,}", delta=f"回购GMV ¥{repur_gmv:,.0f}")
+    k4.metric("回购率", f"{repur_rate * 100:.2f}%", help="回购人数 ÷ 买样人数")
+
+    st.divider()
+
+    # ── 维度2：按 sample 购买月份（cohort）──
+    st.markdown("##### 📅 按 Sample 购买月份（活动期 cohort）")
+    cohort = first_smp.copy()
+    cohort["sample_ym"] = cohort["smp_time"].dt.strftime("%Y-%m")
+    buyers_by_ym = cohort.groupby("sample_ym")["user_id"].nunique().rename("买样人数")
+
+    repur_cohort = repur[["user_id"]].drop_duplicates().merge(
+        cohort[["user_id", "sample_ym"]], on="user_id", how="left")
+    repur_users_by_ym = repur_cohort.groupby("sample_ym")["user_id"].nunique().rename("回购人数")
+    orders_cohort = repur.merge(cohort[["user_id", "sample_ym"]], on="user_id", how="left")
+    repur_orders_by_ym = orders_cohort.groupby("sample_ym").size().rename("回购订单数")
+
+    monthly = (
+        pd.concat([buyers_by_ym, repur_users_by_ym, repur_orders_by_ym], axis=1)
+        .fillna(0).astype(int).reset_index().sort_values("sample_ym")
+    )
+    monthly["回购率(%)"] = (monthly["回购人数"] / monthly["买样人数"].replace(0, 1) * 100).round(2)
+
+    fig = px.bar(
+        monthly, x="sample_ym", y=["买样人数", "回购人数"], barmode="group",
+        title="各 Sample 购买月份：买样人数 vs 回购人数",
+        color_discrete_map={"买样人数": "#45B7D1", "回购人数": "#FF6B6B"},
+    )
+    fig.add_scatter(
+        x=monthly["sample_ym"], y=monthly["回购率(%)"], name="回购率(%)",
+        mode="lines+markers", yaxis="y2", line=dict(color="#FFA94D"),
+    )
+    fig.update_layout(
+        xaxis_title="Sample 购买月份", yaxis_title="人数", height=400,
+        yaxis2=dict(title="回购率(%)", overlaying="y", side="right", showgrid=False),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    st.dataframe(
+        monthly.rename(columns={"sample_ym": "Sample购买月份"}),
+        use_container_width=True, hide_index=True,
+    )
+
+    st.divider()
+
+    # ── 回购货品：回购的正装订单按货号排名 ──
+    st.markdown("##### 🛍 回购货品（回购的正装订单按货号）")
+    prod = (
+        repur.groupby("sku")
+        .agg(回购订单数=("gmv", "count"), 回购人数=("user_id", "nunique"), 回购GMV=("gmv", "sum"))
+        .reset_index().rename(columns={"sku": "货号"})
+        .sort_values("回购订单数", ascending=False)
+    )
+    prod["回购GMV"] = prod["回购GMV"].round(0)
+    st.dataframe(prod.head(500), use_container_width=True, hide_index=True, height=380)
+
+    cda, cdb = st.columns(2)
+    cda.download_button(
+        "📥 下载回购货品 CSV",
+        data=prod.to_csv(index=False).encode("utf-8-sig"),
+        file_name="sample_repurchase_products.csv", mime="text/csv",
+        key="smp_dl_prod",
+    )
+    cdb.download_button(
+        "📥 下载月度 cohort CSV",
+        data=monthly.to_csv(index=False).encode("utf-8-sig"),
+        file_name="sample_repurchase_monthly.csv", mime="text/csv",
+        key="smp_dl_monthly",
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 主入口
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1674,13 +2140,15 @@ def main():
 
     pairs_filtered = filter_pairs(pairs, f)
 
-    t1, t2, t3, t4, t5, t6, t7 = st.tabs([
+    t1, t2, t3, t4, t5, t6, t7, t8, t9 = st.tabs([
         "🏷 渠道汇总",
         "📈 新老客趋势",
         "📦 货品分析",
+        "📐 RFM",
         "🔄 渠道流转",
         "🔁 复购率",
         "⏱ 复购周期",
+        "🧪 Sample回购",
         "💰 平台优惠",
     ])
 
@@ -1691,12 +2159,16 @@ def main():
     with t3:
         tab_product(df)
     with t4:
-        tab_channel_flow(df, pairs_filtered)
+        tab_rfm(df, orders, f)
     with t5:
-        tab_repurchase_rate(df, pairs_filtered)
+        tab_channel_flow(df, pairs_filtered)
     with t6:
-        tab_repurchase_cycle(df, pairs_filtered)
+        tab_repurchase_rate(df, pairs_filtered)
     with t7:
+        tab_repurchase_cycle(df, pairs_filtered)
+    with t8:
+        tab_sample_repurchase(df)
+    with t9:
         tab_platform_discount(df)
 
 
