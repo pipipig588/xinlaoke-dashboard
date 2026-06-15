@@ -19,8 +19,10 @@ from config import (
     MAX_PURCHASE_RANK,
     OLD_CUSTOMER_MIN_AMOUNT,
     OLD_CUSTOMER_MIN_DAYS,
+    ORDERS_FILE_KEYWORD,
     PROCESSED_DATA_DIR,
     RAW_DATA_DIR,
+    SAMPLE_FILE_KEYWORD,
     SANKEY_MIN_COUNT,
     TRANSACTION_SUCCESS_STATUS,
 )
@@ -28,13 +30,24 @@ from config import (
 
 # ── 1. 加载 ───────────────────────────────────────────────────────────────────
 
-def load_all_excel(data_dir: str) -> pd.DataFrame:
-    # 过滤掉 Excel/WPS 打开时产生的临时文件（以 .~ 或 ~$ 开头）
-    files = [f for f in Path(data_dir).glob("*.xlsx")
-             if not f.name.startswith(".~") and not f.name.startswith("~$")]
+def load_all_excel(data_dir: str, name_contains: str, required: bool = True):
+    """读取 data_dir 下文件名包含 name_contains 的所有 .xlsx（合并全部 sheet）。
+
+    按关键词区分，避免把 data/raw 下的多张表（如报表订单 / 派样）误并到一起。
+    required=False 时若没找到文件返回 None（用于可选的派样表）。
+    """
+    files = [
+        f for f in Path(data_dir).glob("*.xlsx")
+        if not f.name.startswith(".~") and not f.name.startswith("~$")
+        and name_contains in f.name
+    ]
     if not files:
-        print(f"[ERROR] 在 {data_dir} 目录下没有找到 .xlsx 文件")
-        sys.exit(1)
+        msg = f"在 {data_dir} 目录下没有找到文件名含「{name_contains}」的 .xlsx 文件"
+        if required:
+            print(f"[ERROR] {msg}")
+            sys.exit(1)
+        print(f"  [跳过] {msg}")
+        return None
 
     dfs = []
     for f in sorted(files):
@@ -310,6 +323,63 @@ def build_purchase_pairs(df: pd.DataFrame) -> pd.DataFrame:
     return pairs
 
 
+# ── 5b. 派样（试用装）清洗 ─────────────────────────────────────────────────────
+
+def clean_samples(df: pd.DataFrame) -> pd.DataFrame:
+    """清洗派样表，输出 samples.parquet。结构与订单类似，但仅保留 sample 回购分析所需字段。"""
+    reverse_map = {v: k for k, v in COLUMN_MAP.items()}
+    df = df.rename(columns=reverse_map)
+
+    needed = [
+        "user_id",          # 淘宝ID（与订单表关联回购）
+        "sub_order_id",     # 子订单编号（去重粒度）
+        "sku",              # 货号（sample 产品筛选维度；当前多为空，后续补值）
+        "product_name",     # 选购商品（商品名）
+        "merchant_code",    # 商家编码
+        "order_status",     # 订单状态
+        "payable_amount",   # 订单应付金额
+        "pay_time",         # 支付时间（优先）
+        "order_submit_time",# 备用时间
+    ]
+    df = df[[c for c in needed if c in df.columns]].copy()
+
+    for col in ("pay_time", "order_submit_time"):
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+    if "pay_time" not in df.columns or df["pay_time"].isna().all():
+        df["pay_time"] = df.get("order_submit_time", pd.NaT)
+    else:
+        df["pay_time"] = df["pay_time"].fillna(df.get("order_submit_time"))
+
+    df = df.dropna(subset=["pay_time", "user_id"])
+    df["user_id"] = df["user_id"].astype(str).str.strip()
+
+    df["payable_amount"] = pd.to_numeric(df.get("payable_amount"), errors="coerce").fillna(0)
+    df["gmv"] = df["payable_amount"]
+
+    for col, default in [("sku", "未知"), ("order_status", "未知"),
+                         ("product_name", "未知"), ("merchant_code", "未知")]:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.strip().replace(
+                {"nan": default, "": default, "None": default, "-": default})
+        else:
+            df[col] = default
+
+    df["order_date"] = df["pay_time"].dt.date
+    df["order_ym"]   = df["pay_time"].dt.strftime("%Y-%m")
+
+    # 去重：每行即一个唯一子订单编号
+    before = len(df)
+    if "sub_order_id" in df.columns:
+        df["sub_order_id"] = df["sub_order_id"].astype(str).str.strip()
+        df = df.drop_duplicates(subset=["sub_order_id"])
+    if before != len(df):
+        print(f"  去重移除 {before - len(df):,} 行重复记录")
+
+    print(f"  派样清洗后剩余 {len(df):,} 行  |  买样用户 {df['user_id'].nunique():,}")
+    return df
+
+
 # ── 6. 保存 ───────────────────────────────────────────────────────────────────
 
 def save_all(df: pd.DataFrame, pairs: pd.DataFrame, out_dir: str):
@@ -365,18 +435,26 @@ def save_all(df: pd.DataFrame, pairs: pd.DataFrame, out_dir: str):
 
 if __name__ == "__main__":
     print("=" * 55)
-    print("Step 1/5  加载 Excel ...")
-    raw = load_all_excel(RAW_DATA_DIR)
+    print("Step 1/6  加载订单 Excel ...")
+    raw = load_all_excel(RAW_DATA_DIR, ORDERS_FILE_KEYWORD)
 
-    print("Step 2/5  清洗数据 ...")
+    print("Step 2/6  清洗数据 ...")
     df = clean(raw)
 
-    print("Step 3/5  标记新老客 ...")
+    print("Step 3/6  标记新老客 ...")
     df = label_customer_type(df)
 
-    print("Step 4/5  计算购买序号与购买对 ...")
+    print("Step 4/6  计算购买序号与购买对 ...")
     df = add_purchase_rank(df)
     pairs = build_purchase_pairs(df)
 
-    print("Step 5/5  保存文件 ...")
+    print("Step 5/6  保存订单文件 ...")
     save_all(df, pairs, PROCESSED_DATA_DIR)
+
+    print("Step 6/6  处理派样（试用装）表 ...")
+    sample_raw = load_all_excel(RAW_DATA_DIR, SAMPLE_FILE_KEYWORD, required=False)
+    if sample_raw is not None:
+        samples = clean_samples(sample_raw)
+        Path(PROCESSED_DATA_DIR).mkdir(parents=True, exist_ok=True)
+        samples.to_parquet(f"{PROCESSED_DATA_DIR}/samples.parquet", index=False)
+        print(f"   ✅ 派样数据已保存 → {PROCESSED_DATA_DIR}/samples.parquet")

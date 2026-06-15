@@ -42,6 +42,10 @@ AMOUNT_FIELD = "payable_amount"
 RAW_DATA_DIR       = "data/raw"
 PROCESSED_DATA_DIR = "data/processed"
 
+# ── 多表识别（data/raw 下可同时存在多张表，按文件名关键词区分）──────────────────
+ORDERS_FILE_KEYWORD = "报表订单"   # 文件名含此关键词 → 正装订单表
+SAMPLE_FILE_KEYWORD = "派样"       # 文件名含此关键词 → 派样（低价试用装）表
+
 # ── Sankey / 流转图 ────────────────────────────────────────────────────────────
 SANKEY_MIN_COUNT = 3   # 低于此次数的路径不显示
 MAX_PURCHASE_RANK = 6  # 最多展示第几次购买
