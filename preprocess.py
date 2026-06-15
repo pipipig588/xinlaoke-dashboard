@@ -59,6 +59,7 @@ def clean(df: pd.DataFrame) -> pd.DataFrame:
     # ── 只保留必要列，其余全部丢弃（减少敏感信息）──
     needed = [
         "user_id",          # 新老客判断（已加密）
+        "sub_order_id",     # 子订单编号（去重粒度，每行唯一）
         "sku",              # 货号
         "influencer_name",  # 达人昵称/渠道
         "order_status",     # 订单状态
@@ -133,9 +134,23 @@ def clean(df: pd.DataFrame) -> pd.DataFrame:
     df["order_date"] = df["pay_time"].dt.date
     df["order_ym"]   = df["pay_time"].dt.strftime("%Y-%m")
 
-    # 去重（同一订单可能多行）— 以 user_id + pay_time + sku 为粒度去重
+    # 去重 — 按「子订单编号」去重，原表每行即一个唯一子订单，只删真正重复的行。
+    # （旧逻辑按 user_id+pay_time+sku+influencer 去重，会把"同人同时同货号"拆成的
+    #   多个子订单误并成一行，导致订单数与 GMV 被低估约 6%，故改为按子订单编号。）
     before = len(df)
-    df = df.drop_duplicates(subset=["user_id", "pay_time", "sku", "influencer_name"])
+    if "sub_order_id" in df.columns:
+        df["sub_order_id"] = (
+            df["sub_order_id"].astype(str).str.strip()
+            .replace({"nan": "", "None": ""})
+        )
+        has_id = df["sub_order_id"] != ""
+        df = pd.concat([
+            df[has_id].drop_duplicates(subset=["sub_order_id"]),
+            # 子订单编号缺失的行用旧粒度兜底，避免空值被全部并成一行
+            df[~has_id].drop_duplicates(subset=["user_id", "pay_time", "sku", "influencer_name"]),
+        ], ignore_index=True)
+    else:
+        df = df.drop_duplicates(subset=["user_id", "pay_time", "sku", "influencer_name"])
     after = len(df)
     if before != after:
         print(f"  去重移除 {before - after:,} 行重复记录")
