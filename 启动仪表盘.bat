@@ -13,9 +13,19 @@ echo.
 REM 检查 Python
 where python >nul 2>nul
 if errorlevel 1 (
-    echo [错误] 找不到 Python，请先安装 Python 3.9+
-    echo 安装地址: https://www.python.org/downloads/windows/
-    echo 安装时务必勾选 "Add Python to PATH"
+    echo [错误] 找不到 Python
+    echo.
+    if exist "python-3.12.9-amd64.exe" (
+        echo 已为你准备好 Python 3.12.9 安装包，正在打开...
+        echo.
+        echo ★★★ 安装时请务必勾选最下面那个 "Add python.exe to PATH" ★★★
+        echo.
+        echo 安装完成后请重新双击本 .bat 文件启动仪表盘。
+        start "" "python-3.12.9-amd64.exe"
+    ) else (
+        echo 请到 https://www.python.org/downloads/windows/ 下载 Python 3.9+
+        echo 安装时务必勾选 "Add Python to PATH"
+    )
     pause
     exit /b 1
 )
