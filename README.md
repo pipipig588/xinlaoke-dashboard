@@ -58,15 +58,21 @@ D:\xinlaoke\data\raw\报表订单.xlsx
 
 ## 三、更新数据（换新的 Excel）
 
-1. 把新的 `报表订单.xlsx` **覆盖** `data\raw\` 下的旧文件
-2. 删除 `data\processed\` 文件夹下的所有文件（或直接删除整个 processed 文件夹）
-3. 双击 `启动仪表盘.bat`，会自动重新预处理
+> ⚠️ **关键：仪表盘只读 `data/processed/` 里的 parquet，不直接读 Excel。**
+> 换了新 Excel 后，**必须重新跑一次预处理**，把 xlsx 转成 parquet，页面才会更新。
+> 只把新 Excel 放进 `data/raw/` 但不跑预处理 → 页面数据不变（甚至报「数据文件不存在」）。
 
-或者命令行手动：
-```
-cd D:\xinlaoke
-python preprocess.py
-```
+1. 把新的 `报表订单.xlsx` **覆盖** `data\raw\` 下的旧文件（先确认 Excel 已关闭，否则会有 `.~xxx.xlsx` 临时锁文件，读取可能报错）
+2. 重新跑预处理（二选一）：
+   - 双击 `启动仪表盘.bat`，会自动重新预处理；**或**
+   - 命令行手动：
+     ```
+     cd D:\xinlaoke
+     python preprocess.py
+     ```
+3. 刷新浏览器页面（⌘R / Ctrl+R）即可看到新数据
+
+> 🛑 **不要删 `data/raw/` 或 `data/processed/` 文件夹。** 这两个目录被 `.gitignore` 排除、不在 git 里，删了无法用 `git` 恢复，只能重新放 Excel + 重跑预处理。做「备份清理」时务必跳过 `data/` 目录。
 
 ---
 
