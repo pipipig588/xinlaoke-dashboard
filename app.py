@@ -12,6 +12,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 # 平台优惠 "券名-金额" 提取（贪婪 + 末尾数字，支持千分位逗号）
 COUPON_RE = re.compile(r"^(.+)-([\d,]+(?:\.\d+)?)$")
@@ -1938,15 +1939,15 @@ def tab_platform_discount(df: pd.DataFrame):
 def tab_sample_repurchase(df: pd.DataFrame):
     """Sample（低价试用装）回购分析。
 
-    回购定义：买过 sample 的顾客，之后（或同时）购买正装即算回购，
-    即正装支付时间 ≥ 该顾客在所选 sample 窗口内最早一次买样时间。
-    回购时间口径 = 左侧全局时间筛选（df 已是全局筛选后的正装订单）。
+    回购定义（ELC 口径）：在所选 sample 窗口内买过 sample 的顾客，只要在全局筛选
+    范围内有过正装购买即算回购——**不要求**正装时间晚于买样时间。
+    回购观察口径 = 左侧全局时间筛选（df 已是全局筛选后的正装订单）。
     """
     st.subheader("Sample 回购分析 — 试用装转正装")
     st.caption(
-        "买过低价试用装（sample）的顾客，之后或同时购买**正装**即视为回购"
-        "（正装购买时间不得早于买样时间）。**回购时间口径 = 左侧全局筛选**；"
-        "下方三个筛选只作用于 sample（活动期间）。"
+        "在所选 sample 窗口内买过试用装（sample）的顾客，只要在全局筛选范围内"
+        "**有过正装购买**即视为回购（ELC 口径：不要求正装购买晚于买样时间）。"
+        "**回购观察口径 = 左侧全局筛选**；下方三个筛选只作用于 sample（活动期间）。"
     )
 
     try:
@@ -2000,9 +2001,9 @@ def tab_sample_repurchase(df: pd.DataFrame):
     first_smp = smp.groupby("user_id")["pay_time"].min().rename("smp_time").reset_index()
     n_buyers = len(first_smp)
 
-    # 回购 = 全局筛选后的正装订单中，买样用户且正装时间 ≥ 其最早买样时间
-    o = df[["user_id", "pay_time", "sku", "gmv"]].merge(first_smp, on="user_id", how="inner")
-    repur = o[o["pay_time"] >= o["smp_time"]].copy()
+    # 回购 = 买样用户在全局筛选范围内的全部正装订单（ELC 口径：不要求正装时间晚于
+    #        买样时间，只要买过 sample 且有正装购买即算回购）
+    repur = df[["user_id", "pay_time", "sku", "gmv"]].merge(first_smp, on="user_id", how="inner")
 
     n_repur_orders = len(repur)
     n_repur_users  = repur["user_id"].nunique()
@@ -2273,6 +2274,23 @@ def tab_crowd(df: pd.DataFrame):
 
 def main():
     st.title("📊 直播间销售数据分析")
+
+    # 拦截 Cmd/Ctrl+C：避免复制文本时触发 Streamlit 的「Clear caches」快捷键弹窗。
+    # 捕获阶段 stopImmediatePropagation 抢在 Streamlit 监听器之前，但不 preventDefault，
+    # 浏览器原生复制仍然正常。
+    components.html(
+        """
+<script>
+const doc = window.parent.document;
+doc.addEventListener('keydown', function(e){
+  if ((e.key === 'c' || e.key === 'C') && (e.metaKey || e.ctrlKey)) {
+    e.stopImmediatePropagation();
+  }
+}, true);
+</script>
+""",
+        height=0,
+    )
 
     st.markdown("""
 <style>
