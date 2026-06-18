@@ -5,6 +5,7 @@
 
 import io
 import json
+import os
 import re
 from pathlib import Path
 
@@ -18,6 +19,32 @@ import streamlit.components.v1 as components
 COUPON_RE = re.compile(r"^(.+)-([\d,]+(?:\.\d+)?)$")
 
 st.set_page_config(page_title="直播间销售分析", layout="wide", page_icon="📊")
+
+# 访问密码：优先读环境变量 DASH_PASSWORD（由启动脚本设置），否则用下面默认值。
+# 设为空字符串则关闭密码（任何人可直接访问）。
+DEFAULT_PASSWORD = "xinlaoke2026"
+
+
+def _check_password() -> bool:
+    """网页访问密码门。返回 True 表示已通过。适用于任何访问入口（本地/内网/公网隧道）。"""
+    pw = os.environ.get("DASH_PASSWORD", DEFAULT_PASSWORD)
+    if not pw:                       # 空密码 = 不启用门禁
+        return True
+    if st.session_state.get("_auth_ok"):
+        return True
+
+    st.title("🔒 直播间销售数据分析")
+    st.caption("请输入访问密码")
+    with st.form("login_form"):
+        entered = st.text_input("访问密码", type="password", label_visibility="collapsed")
+        ok = st.form_submit_button("进入")
+    if ok:
+        if entered == pw:
+            st.session_state["_auth_ok"] = True
+            st.rerun()
+        else:
+            st.error("❌ 密码错误，请重试")
+    return False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2460,6 +2487,9 @@ def tab_crowd(df: pd.DataFrame):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def main():
+    if not _check_password():
+        st.stop()
+
     st.title("📊 直播间销售数据分析")
 
     # 拦截 Cmd/Ctrl+C：避免复制文本时触发 Streamlit 的「Clear caches」快捷键弹窗。

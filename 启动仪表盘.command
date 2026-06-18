@@ -4,10 +4,10 @@
 
 cd /Users/anirv/Downloads/xinlaoke
 
-# ===== 公网隧道账号密码（如需修改，改这两行即可）=====
-NGROK_USER="lm"
-NGROK_PASS="xinlaoke2026"
-# ====================================================
+# ===== 网页访问密码（如需修改，改这一行即可；空字符串=不要密码）=====
+DASH_PASS="xinlaoke2026"
+# ===================================================================
+export DASH_PASSWORD="$DASH_PASS"
 
 # 定位可执行文件（双击启动时 PATH 可能不全，用绝对路径兜底）
 NGROK_BIN=$(command -v ngrok || echo /opt/homebrew/bin/ngrok)
@@ -21,6 +21,7 @@ sleep 2
 echo "🚀 启动 Streamlit..."
 STREAMLIT_BROWSER_GATHER_USAGE_STATS=false \
 STREAMLIT_SERVER_HEADLESS=true \
+DASH_PASSWORD="$DASH_PASS" \
 nohup "$STREAMLIT_BIN" run app.py \
   --server.address 0.0.0.0 \
   --server.port 8501 \
@@ -32,12 +33,11 @@ nohup "$STREAMLIT_BIN" run app.py \
 echo "⏳ 等待 Streamlit 启动..."
 sleep 6
 
-# ===== 启动公网隧道（ngrok + Basic Auth）=====
+# ===== 启动公网隧道（ngrok；密码已在网页里，隧道不再单独加密码）=====
 PUBLIC_URL=""
 if [ -x "$NGROK_BIN" ]; then
     echo "🌐 启动公网隧道 (ngrok)..."
     nohup "$NGROK_BIN" http 8501 \
-      --basic-auth "$NGROK_USER:$NGROK_PASS" \
       --log=stdout < /dev/null > /tmp/ngrok.log 2>&1 &
 
     # 轮询本地 API 拿公网网址（最多等 ~15 秒）
@@ -78,20 +78,25 @@ if [ -n "$TAILSCALE_IP" ]; then
 fi
 if [ -n "$PUBLIC_URL" ]; then
     echo "----------------------------------------"
-    echo "🌍 公网链接(任何人可访问，需密码):"
+    echo "🌍 公网链接(任何人可访问):"
     echo "     $PUBLIC_URL"
-    echo "     账号: $NGROK_USER   密码: $NGROK_PASS"
 elif [ -x "$NGROK_BIN" ]; then
     echo "----------------------------------------"
     echo "⚠️  公网隧道未取到网址，看 /tmp/ngrok.log 排查"
 fi
+echo "----------------------------------------"
+if [ -n "$DASH_PASS" ]; then
+    echo "🔑 网页访问密码: $DASH_PASS （所有链接打开后都要先输）"
+else
+    echo "🔑 未设置网页密码（任何能打开链接的人都能直接访问）"
+fi
 echo "========================================"
 echo ""
 echo "📤 同事访问方式："
-echo "   • 同公司内网 → 公司内网链接（无需账号）"
+echo "   • 同公司内网 → 公司内网链接"
 echo "   • 远程       → Tailscale 私有链接（需加入 Tailscale）"
 if [ -n "$PUBLIC_URL" ]; then
-    echo "   • 任意外网   → 公网链接（输账号密码即可，无需安装任何东西）"
+    echo "   • 任意外网   → 公网链接（无需安装任何东西，打开后输密码即可）"
 fi
 echo "❌ 关闭此窗口会停止服务，请保持此窗口开着"
 echo ""
