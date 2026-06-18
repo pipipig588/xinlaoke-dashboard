@@ -1,17 +1,27 @@
 #!/bin/bash
-# 直播间仪表盘一键启动脚本（Tailscale 安全版）
+# 直播间仪表盘一键启动脚本（含公网 ngrok 隧道，带密码）
 # 双击此文件即可启动
 
 cd /Users/anirv/Downloads/xinlaoke
 
-echo "🔄 停止旧的 Streamlit 进程..."
+# ===== 公网隧道账号密码（如需修改，改这两行即可）=====
+NGROK_USER="lm"
+NGROK_PASS="xinlaoke2026"
+# ====================================================
+
+# 定位可执行文件（双击启动时 PATH 可能不全，用绝对路径兜底）
+NGROK_BIN=$(command -v ngrok || echo /opt/homebrew/bin/ngrok)
+STREAMLIT_BIN=/Users/anirv/Library/Python/3.9/bin/streamlit
+
+echo "🔄 停止旧进程..."
 pkill -f "streamlit run" 2>/dev/null
+pkill -f "ngrok http"   2>/dev/null
 sleep 2
 
 echo "🚀 启动 Streamlit..."
 STREAMLIT_BROWSER_GATHER_USAGE_STATS=false \
 STREAMLIT_SERVER_HEADLESS=true \
-nohup /Users/anirv/Library/Python/3.9/bin/streamlit run app.py \
+nohup "$STREAMLIT_BIN" run app.py \
   --server.address 0.0.0.0 \
   --server.port 8501 \
   --server.enableCORS false \
@@ -19,8 +29,31 @@ nohup /Users/anirv/Library/Python/3.9/bin/streamlit run app.py \
   --server.headless true \
   < /dev/null > /tmp/streamlit.log 2>&1 &
 
-echo "⏳ 等待启动..."
+echo "⏳ 等待 Streamlit 启动..."
 sleep 6
+
+# ===== 启动公网隧道（ngrok + Basic Auth）=====
+PUBLIC_URL=""
+if [ -x "$NGROK_BIN" ]; then
+    echo "🌐 启动公网隧道 (ngrok)..."
+    nohup "$NGROK_BIN" http 8501 \
+      --basic-auth "$NGROK_USER:$NGROK_PASS" \
+      --log=stdout < /dev/null > /tmp/ngrok.log 2>&1 &
+
+    # 轮询本地 API 拿公网网址（最多等 ~15 秒）
+    for i in $(seq 1 15); do
+        PUBLIC_URL=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null \
+          | python3 -c "import sys,json
+try:
+    d=json.load(sys.stdin); print(d['tunnels'][0]['public_url'])
+except Exception:
+    pass" 2>/dev/null)
+        [ -n "$PUBLIC_URL" ] && break
+        sleep 1
+    done
+else
+    echo "⚠️  未找到 ngrok，跳过公网隧道（局域网/Tailscale 仍可用）"
+fi
 
 # 获取 Tailscale IP
 TAILSCALE_IP=$(tailscale ip -4 2>/dev/null || /Applications/Tailscale.app/Contents/MacOS/Tailscale ip -4 2>/dev/null)
@@ -43,16 +76,37 @@ done
 if [ -n "$TAILSCALE_IP" ]; then
     echo "🔒 Tailscale 私有:    http://$TAILSCALE_IP:8501"
 fi
+if [ -n "$PUBLIC_URL" ]; then
+    echo "----------------------------------------"
+    echo "🌍 公网链接(任何人可访问，需密码):"
+    echo "     $PUBLIC_URL"
+    echo "     账号: $NGROK_USER   密码: $NGROK_PASS"
+elif [ -x "$NGROK_BIN" ]; then
+    echo "----------------------------------------"
+    echo "⚠️  公网隧道未取到网址，看 /tmp/ngrok.log 排查"
+fi
 echo "========================================"
 echo ""
 echo "📤 同事访问方式："
-echo "   • 同公司内网 → 公司内网链接（无需任何账号）"
-echo "   • 远程       → Tailscale 私有链接（需加入 Tailscale 网络）"
+echo "   • 同公司内网 → 公司内网链接（无需账号）"
+echo "   • 远程       → Tailscale 私有链接（需加入 Tailscale）"
+if [ -n "$PUBLIC_URL" ]; then
+    echo "   • 任意外网   → 公网链接（输账号密码即可，无需安装任何东西）"
+fi
 echo "❌ 关闭此窗口会停止服务，请保持此窗口开着"
 echo ""
 
 # 自动打开本地浏览器
 open "http://localhost:8501"
 
+# 退出时一并关闭后台进程
+cleanup() {
+    echo ""
+    echo "🛑 正在停止服务..."
+    pkill -f "streamlit run" 2>/dev/null
+    pkill -f "ngrok http"   2>/dev/null
+}
+trap cleanup EXIT
+
 # 保持窗口不关闭
-read -p "按回车键退出（退出后服务停止）..."
+read -p "按回车键退出（退出后服务与隧道都会停止）..."
