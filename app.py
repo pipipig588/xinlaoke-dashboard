@@ -1936,18 +1936,18 @@ def tab_platform_discount(df: pd.DataFrame):
     )
 
 
-def tab_sample_repurchase(df: pd.DataFrame):
-    """Sample（低价试用装）回购分析。
+def tab_sample_repurchase(df: pd.DataFrame, df_yoy: pd.DataFrame = None, yoy_on: bool = False):
+    """派样（低价试用装）回购分析。
 
-    回购定义（ELC 口径）：在所选 sample 窗口内买过 sample 的顾客，只要在全局筛选
-    范围内有过正装购买即算回购——**不要求**正装时间晚于买样时间。
+    回购定义：在所选派样窗口内买过试用装的顾客，只要在全局筛选范围内有过正装购买即算回购。
     回购观察口径 = 左侧全局时间筛选（df 已是全局筛选后的正装订单）。
+    yoy_on 时用 df_yoy（同比时间段的正装订单）对同一批买样用户算回购，给出同比差值。
     """
-    st.subheader("Sample 回购分析 — 试用装转正装")
+    st.subheader("派样分析 — 试用装转正装")
     st.caption(
-        "在所选 sample 窗口内买过试用装（sample）的顾客，只要在全局筛选范围内"
-        "**有过正装购买**即视为回购（ELC 口径：不要求正装购买晚于买样时间）。"
-        "**回购观察口径 = 左侧全局筛选**；下方三个筛选只作用于 sample（活动期间）。"
+        "在所选派样窗口内买过试用装（派样）的顾客，只要在全局筛选范围内"
+        "**有过正装购买**即视为回购。"
+        "**回购观察口径 = 左侧全局筛选**；下方四个筛选只作用于派样（活动期间）。"
     )
 
     try:
@@ -1959,70 +1959,134 @@ def tab_sample_repurchase(df: pd.DataFrame):
         )
         return
 
-    # ── Sample 专属筛选（3 个，独立于左侧全局筛选）──
+    # 兼容旧数据：派样类型列可能尚未生成
+    if "sample_type" not in samples.columns:
+        samples["sample_type"] = "未知"
+
+    # ── 派样专属筛选（独立于左侧全局筛选）──
     s_min, s_max = samples["pay_time"].min().date(), samples["pay_time"].max().date()
-    c1, c2, c3 = st.columns([2, 2, 2])
+    c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
     with c1:
         s_date = st.date_input(
-            "① Sample 购买时间（活动期间）",
+            "① 派样购买时间（活动期间）",
             value=(s_min, s_max), min_value=s_min, max_value=s_max,
             key="smp_date",
         )
-    with c2:
-        status_opts = sorted(samples["order_status"].unique().tolist())
-        s_status = st.multiselect(
-            "② Sample 订单状态", status_opts, default=status_opts, key="smp_status",
-        )
-    with c3:
-        sku_opts = sorted(samples["sku"].unique().tolist())
-        s_sku = st.multiselect(
-            "③ Sample 货号", sku_opts, default=[], key="smp_sku",
-            help="留空 = 全部货号。注：当前派样表货号大多为空，后续补充货号值后此处即可精确筛选。",
-        )
-
     # 解析日期范围（date_input 选一个值时返回单值）
     if isinstance(s_date, (tuple, list)) and len(s_date) == 2:
         sd0, sd1 = s_date
     else:
         sd0 = sd1 = s_date if not isinstance(s_date, (tuple, list)) else s_date[0]
 
+    # 时间窗内的派样记录 —— 货号/派样类型选项只从该窗口内取（点3：只保留当时派样时段内有的货号）
+    in_window = samples[(samples["pay_time"].dt.date >= sd0) & (samples["pay_time"].dt.date <= sd1)]
+
+    with c2:
+        status_opts = sorted(samples["order_status"].unique().tolist())
+        s_status = st.multiselect(
+            "② 派样订单状态", status_opts, default=status_opts, key="smp_status",
+        )
+    with c3:
+        type_opts = sorted(in_window["sample_type"].unique().tolist())
+        s_type = st.multiselect(
+            "③ 派样类型", type_opts, default=type_opts, key="smp_type",
+            help="付邮试用 / 尝鲜礼盒 等。选项仅含所选时间窗内出现过的派样类型。",
+        )
+    with c4:
+        # 货号选项随时间窗 + 派样类型联动，只展示窗口内实际出现过的货号
+        sku_pool = in_window
+        if s_type:
+            sku_pool = sku_pool[sku_pool["sample_type"].isin(s_type)]
+        sku_opts = sorted(sku_pool["sku"].unique().tolist())
+        s_sku = st.multiselect(
+            "④ 派样货号", sku_opts, default=[], key="smp_sku",
+            help="留空 = 该时间窗内全部货号。选项仅含所选时间窗（及派样类型）内出现过的货号。",
+        )
+
     smask = (samples["pay_time"].dt.date >= sd0) & (samples["pay_time"].dt.date <= sd1)
     if s_status:
         smask &= samples["order_status"].isin(s_status)
+    if s_type:
+        smask &= samples["sample_type"].isin(s_type)
     if s_sku:
         smask &= samples["sku"].isin(s_sku)
     smp = samples[smask]
 
     if smp.empty:
-        st.warning("⚠️ 当前 sample 筛选条件下没有买样记录，请放宽条件。")
+        st.warning("⚠️ 当前派样筛选条件下没有买样记录，请放宽条件。")
         return
 
     # 每个用户在所选窗口内「最早一次买样时间」作为回购门槛
     first_smp = smp.groupby("user_id")["pay_time"].min().rename("smp_time").reset_index()
     n_buyers = len(first_smp)
 
-    # 回购 = 买样用户在全局筛选范围内的全部正装订单（ELC 口径：不要求正装时间晚于
-    #        买样时间，只要买过 sample 且有正装购买即算回购）
-    repur = df[["user_id", "pay_time", "sku", "gmv"]].merge(first_smp, on="user_id", how="inner")
+    # 回购 = 买样用户在全局筛选范围内的全部正装订单
+    repur = df[["user_id", "pay_time", "sku", "gmv", "customer_type"]].merge(
+        first_smp, on="user_id", how="inner")
 
+    n_smp_orders   = len(smp)
     n_repur_orders = len(repur)
     n_repur_users  = repur["user_id"].nunique()
     repur_rate     = (n_repur_users / n_buyers) if n_buyers else 0.0
     repur_gmv      = float(repur["gmv"].sum())
 
+    # 新客 = 买样用户中在全局筛选范围内有正装订单、且被判定为新客的人数。
+    #   口径与全店 KPI 完全一致：只要其正装订单里出现过「新客」即记为新客；
+    #   「老客判定」默认 = 交易成功(已完成) 的正装客，可由左侧「老客判定规则」修改。
+    #   拉新率 = 新客人数 ÷ 买样人数。
+    if not repur.empty:
+        utype = repur.groupby("user_id")["customer_type"].apply(
+            lambda s: "新客" if (s == "新客").any() else "老客")
+        n_new_users = int((utype == "新客").sum())
+    else:
+        n_new_users = 0
+    acq_rate = (n_new_users / n_buyers) if n_buyers else 0.0
+
+    # YoY：同一批买样用户在左侧「同比时间段」内的正装回购表现
+    yoy_active = yoy_on and df_yoy is not None and not df_yoy.empty
+    y_orders = y_users = y_new = 0
+    y_rate = y_gmv = y_acq = 0.0
+    if yoy_active:
+        repur_y = df_yoy[["user_id", "pay_time", "gmv", "customer_type"]].merge(
+            first_smp, on="user_id", how="inner")
+        y_orders = len(repur_y)
+        y_users  = repur_y["user_id"].nunique()
+        y_rate   = (y_users / n_buyers) if n_buyers else 0.0
+        y_gmv    = float(repur_y["gmv"].sum())
+        if not repur_y.empty:
+            utype_y = repur_y.groupby("user_id")["customer_type"].apply(
+                lambda s: "新客" if (s == "新客").any() else "老客")
+            y_new = int((utype_y == "新客").sum())
+        y_acq = (y_new / n_buyers) if n_buyers else 0.0
+
     # ── 维度1：活动期间整体 KPI ──
-    st.markdown("##### 📊 活动期间整体（按所选 sample 窗口）")
-    k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("买样人数", f"{n_buyers:,}")
-    k2.metric("回购人数", f"{n_repur_users:,}")
-    k3.metric("回购订单数", f"{n_repur_orders:,}")
-    k4.metric("回购率", f"{repur_rate * 100:.2f}%", help="回购人数 ÷ 买样人数")
-    k5.metric("回购GMV", f"¥{repur_gmv:,.0f}")
+    st.markdown("##### 📊 活动期间整体（按所选派样窗口）")
+    if yoy_active:
+        st.caption("同比差值 = 同一批买样用户在左侧「同比时间段」内的正装回购（派样订单数 / 买样人数不随同比变化）。")
+    kc = st.columns(8)
+    kc[0].metric("派样订单数", f"{n_smp_orders:,}", help="所选派样窗口内的派样订单总数（含同人多单）")
+    kc[1].metric("买样人数", f"{n_buyers:,}")
+    kc[2].metric("新客人数", f"{n_new_users:,}",
+                 delta=(f"{n_new_users - y_new:+,}" if yoy_active else None),
+                 help="买样用户中、在全局筛选内有正装订单且被判定为新客的人数。"
+                      "口径同全店 KPI；老客判定默认=交易成功正装客，可在左侧「老客判定规则」修改")
+    kc[3].metric("拉新率", f"{acq_rate * 100:.2f}%",
+                 delta=(f"{(acq_rate - y_acq) * 100:+.2f}pp" if yoy_active else None),
+                 help="新客人数 ÷ 买样人数")
+    kc[4].metric("回购人数", f"{n_repur_users:,}",
+                 delta=(f"{n_repur_users - y_users:+,}" if yoy_active else None))
+    kc[5].metric("回购订单数", f"{n_repur_orders:,}",
+                 delta=(f"{n_repur_orders - y_orders:+,}" if yoy_active else None))
+    kc[6].metric("回购率", f"{repur_rate * 100:.2f}%",
+                 delta=(f"{(repur_rate - y_rate) * 100:+.2f}pp" if yoy_active else None),
+                 help="回购人数 ÷ 买样人数")
+    kc[7].metric("回购GMV", f"¥{repur_gmv:,.0f}",
+                 delta=(f"{repur_gmv - y_gmv:+,.0f}" if yoy_active else None))
 
     st.divider()
 
-    # ── 维度2：按 sample 购买月份（cohort）──
-    st.markdown("##### 📅 按 Sample 购买月份（活动期 cohort）")
+    # ── 维度2：按派样购买月份（cohort）──
+    st.markdown("##### 📅 按派样购买月份（活动期 cohort）")
     cohort = first_smp.copy()
     cohort["sample_ym"] = cohort["smp_time"].dt.strftime("%Y-%m")
     buyers_by_ym = cohort.groupby("sample_ym")["user_id"].nunique().rename("买样人数")
@@ -2041,20 +2105,29 @@ def tab_sample_repurchase(df: pd.DataFrame):
 
     fig = px.bar(
         monthly, x="sample_ym", y=["买样人数", "回购人数"], barmode="group",
-        title="各 Sample 购买月份：买样人数 vs 回购人数",
+        title="各派样购买月份：买样人数 vs 回购人数",
         color_discrete_map={"买样人数": "#45B7D1", "回购人数": "#FF6B6B"},
     )
     fig.add_scatter(
         x=monthly["sample_ym"], y=monthly["回购率(%)"], name="回购率(%)",
         mode="lines+markers", yaxis="y2", line=dict(color="#FFA94D"),
     )
+    # 悬停统一显示：买样人数 / 回购人数 / 回购率
+    fig.update_traces(selector=dict(name="买样人数"),
+                      hovertemplate="买样人数 %{y:,.0f}<extra></extra>")
+    fig.update_traces(selector=dict(name="回购人数"),
+                      hovertemplate="回购人数 %{y:,.0f}<extra></extra>")
+    fig.update_traces(selector=dict(name="回购率(%)"),
+                      hovertemplate="回购率 %{y:.2f}%<extra></extra>")
     fig.update_layout(
-        xaxis_title="Sample 购买月份", yaxis_title="人数", height=400,
+        xaxis_title="派样购买月份", yaxis_title="人数", height=400,
+        xaxis=dict(type="category"),
+        hovermode="x unified",
         yaxis2=dict(title="回购率(%)", overlaying="y", side="right", showgrid=False),
     )
     st.plotly_chart(fig, use_container_width=True)
     st.dataframe(
-        monthly.rename(columns={"sample_ym": "Sample购买月份"}),
+        monthly.rename(columns={"sample_ym": "派样购买月份"}),
         use_container_width=True, hide_index=True,
     )
 
@@ -2071,7 +2144,74 @@ def tab_sample_repurchase(df: pd.DataFrame):
     prod["回购GMV"] = prod["回购GMV"].round(0)
     st.dataframe(prod.head(500), use_container_width=True, hide_index=True, height=380)
 
-    cda, cdb = st.columns(2)
+    st.divider()
+
+    # ── 派样货品明细：按 派样类型 × 商品（货号）看派样→回购（参考线下表）──
+    st.markdown("##### 🧾 派样货品明细（按 派样类型 × 货号）")
+    st.caption(
+        "**派样订单数**=该派样货品的派样订单数(不去重)，**派样人数**=去重买样人数；**回购人数/订单数/金额/AUS** = 这些人在全局筛选范围内的"
+        "正装订单。**回购订单数**不去重，**回购AUS** = 回购金额 ÷ 回购人数，**回购率** = 回购人数 ÷ 派样人数。"
+        "同一人若试用多款会分别计入各款；每个派样类型「小计」按人去重。"
+    )
+
+    # 每个买样用户的正装回购汇总（金额 / 订单数）
+    user_repur = (
+        repur.groupby("user_id")
+        .agg(rep_gmv=("gmv", "sum"), rep_orders=("gmv", "count")).reset_index()
+    )
+    repur_user_set = set(user_repur["user_id"])
+
+    # 买样用户 ×（派样类型, 货号）去重成员关系
+    memb = smp[["user_id", "sample_type", "sku"]].drop_duplicates().merge(
+        user_repur, on="user_id", how="left")
+    memb["is_rep"] = memb["user_id"].isin(repur_user_set)
+    # 类型级（按人去重，用于小计）
+    memb_type = smp[["user_id", "sample_type"]].drop_duplicates().merge(
+        user_repur, on="user_id", how="left")
+    memb_type["is_rep"] = memb_type["user_id"].isin(repur_user_set)
+
+    def _detail_for(mb, keys):
+        n_smp = mb.groupby(keys)["user_id"].nunique().rename("派样人数")
+        rep = mb[mb["is_rep"]]
+        n_rep = rep.groupby(keys)["user_id"].nunique().rename("回购人数")
+        n_ord = rep.groupby(keys)["rep_orders"].sum().rename("回购订单数")
+        gmv = rep.groupby(keys)["rep_gmv"].sum().rename("回购金额")
+        out = pd.concat([n_smp, n_rep, n_ord, gmv], axis=1).fillna(0)
+        out["回购金额"] = out["回购金额"].round(0)
+        out["回购AUS"] = (out["回购金额"] / out["回购人数"].replace(0, 1)).round(0)
+        out["回购率(%)"] = (out["回购人数"] / out["派样人数"].replace(0, 1) * 100).round(2)
+        return out.reset_index()
+
+    per = _detail_for(memb, ["sample_type", "sku"])
+    tot = _detail_for(memb_type, ["sample_type"])
+
+    # 派样订单数（不去重，直接按派样订单行计数）
+    smp_ord_sku  = smp.groupby(["sample_type", "sku"]).size()
+    smp_ord_type = smp.groupby("sample_type").size()
+
+    cols = ["派样类型", "商品", "派样订单数", "派样人数", "回购人数", "回购订单数",
+            "回购金额", "回购AUS", "回购率(%)"]
+    rows = []
+    for stype in sorted(per["sample_type"].unique()):
+        sub = per[per["sample_type"] == stype].sort_values("派样人数", ascending=False)
+        for _, r in sub.iterrows():
+            rows.append([stype, r["sku"], int(smp_ord_sku.get((stype, r["sku"]), 0)),
+                         int(r["派样人数"]), int(r["回购人数"]),
+                         int(r["回购订单数"]), r["回购金额"], r["回购AUS"], r["回购率(%)"]])
+        tr = tot[tot["sample_type"] == stype]
+        if not tr.empty:
+            r = tr.iloc[0]
+            rows.append([stype, "小计", int(smp_ord_type.get(stype, 0)),
+                         int(r["派样人数"]), int(r["回购人数"]),
+                         int(r["回购订单数"]), r["回购金额"], r["回购AUS"], r["回购率(%)"]])
+    detail = pd.DataFrame(rows, columns=cols)
+
+    fmt = {"派样订单数": "{:,.0f}", "派样人数": "{:,.0f}", "回购人数": "{:,.0f}",
+           "回购订单数": "{:,.0f}", "回购金额": "{:,.0f}",
+           "回购AUS": "{:,.0f}", "回购率(%)": "{:.2f}%"}
+    st.dataframe(detail.style.format(fmt), use_container_width=True, hide_index=True, height=460)
+
+    cda, cdb, cdc = st.columns(3)
     cda.download_button(
         "📥 下载回购货品 CSV",
         data=prod.to_csv(index=False).encode("utf-8-sig"),
@@ -2079,6 +2219,12 @@ def tab_sample_repurchase(df: pd.DataFrame):
         key="smp_dl_prod",
     )
     cdb.download_button(
+        "📥 下载货品明细 CSV",
+        data=detail.to_csv(index=False).encode("utf-8-sig"),
+        file_name="sample_repurchase_detail.csv", mime="text/csv",
+        key="smp_dl_detail",
+    )
+    cdc.download_button(
         "📥 下载月度 cohort CSV",
         data=monthly.to_csv(index=False).encode("utf-8-sig"),
         file_name="sample_repurchase_monthly.csv", mime="text/csv",
@@ -2247,6 +2393,47 @@ def tab_crowd(df: pd.DataFrame):
     crowd_df = pd.DataFrame(rows).sort_values("人群人数", ascending=False)
     st.dataframe(crowd_df, use_container_width=True, hide_index=True)
 
+    st.divider()
+
+    # ── 人群购买趋势（全局筛选范围内，by day/month）──
+    st.markdown("##### 📈 人群购买趋势（全局筛选范围内）")
+    st.caption("所选人群在左侧全局筛选时间范围内的购买变化；可切换按天/按月。")
+    gran = st.radio("时间粒度", ["按天", "按月"], horizontal=True, key="cr_gran")
+    if sub_all.empty:
+        st.info("当前所选人群在全局筛选范围内没有购买记录。")
+    else:
+        tcol = "order_date" if gran == "按天" else "order_ym"
+        ts = (
+            sub_all.groupby(tcol)
+            .agg(订单数=("gmv", "count"), 购买人数=("user_id", "nunique"), GMV=("gmv", "sum"))
+            .reset_index().sort_values(tcol)
+        )
+        ts["x"] = ts[tcol].astype(str)
+        figt = px.bar(
+            ts, x="x", y=["订单数", "购买人数"], barmode="group",
+            title=f"人群购买趋势（{gran}）",
+            color_discrete_map={"订单数": "#45B7D1", "购买人数": "#FF6B6B"},
+        )
+        figt.add_scatter(
+            x=ts["x"], y=ts["GMV"], name="GMV", mode="lines+markers",
+            yaxis="y2", line=dict(color="#FFA94D"),
+        )
+        # 悬停统一显示：订单数 / 购买人数 / GMV
+        figt.update_traces(selector=dict(name="订单数"),
+                           hovertemplate="订单数 %{y:,.0f}<extra></extra>")
+        figt.update_traces(selector=dict(name="购买人数"),
+                           hovertemplate="购买人数 %{y:,.0f}<extra></extra>")
+        figt.update_traces(selector=dict(name="GMV"),
+                           hovertemplate="GMV ¥%{y:,.0f}<extra></extra>")
+        figt.update_layout(
+            xaxis_title=("日期" if gran == "按天" else "月份"), yaxis_title="数量", height=400,
+            xaxis=dict(type="category"),
+            hovermode="x unified",
+            yaxis2=dict(title="GMV", overlaying="y", side="right", showgrid=False),
+        )
+        st.plotly_chart(figt, use_container_width=True)
+
+    st.divider()
     st.markdown("##### 🛍 人群购买货品（按货号）")
     prod = (
         sub_all.groupby("sku")
@@ -2361,7 +2548,7 @@ doc.addEventListener('keydown', function(e){
         "🔄 渠道流转",
         "🔁 复购率",
         "⏱ 复购周期",
-        "🧪 Sample回购",
+        "🧪 派样",
         "🪪 会员",
         "👥 人群",
         "💰 平台优惠",
@@ -2382,7 +2569,7 @@ doc.addEventListener('keydown', function(e){
     with t7:
         tab_repurchase_cycle(df, pairs_filtered)
     with t8:
-        tab_sample_repurchase(df)
+        tab_sample_repurchase(df, df_yoy, f["yoy_on"])
     with t9:
         tab_membership(df)
     with t10:

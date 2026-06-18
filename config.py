@@ -9,6 +9,7 @@ COLUMN_MAP = {
     "product_name":      "选购商品",
     "product_id":        "商品ID",
     "spec":              "商品规格",
+    "sample_type":       "派样类型",       # 派样表：付邮试用 / 尝鲜礼盒 / 积分兑换…（货号前一列）
     "sku":               "货号",           # 品类筛选维度
     "merchant_code":     "商家编码",
     "quantity":          "商品数量",

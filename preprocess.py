@@ -335,6 +335,7 @@ def clean_samples(df: pd.DataFrame) -> pd.DataFrame:
     needed = [
         "user_id",          # 淘宝ID（与订单表关联回购）
         "sub_order_id",     # 子订单编号（去重粒度）
+        "sample_type",      # 派样类型（付邮试用 / 尝鲜礼盒 / 积分兑换…）
         "sku",              # 货号（sample 产品筛选维度；当前多为空，后续补值）
         "product_name",     # 选购商品（商品名）
         "merchant_code",    # 商家编码
@@ -359,7 +360,7 @@ def clean_samples(df: pd.DataFrame) -> pd.DataFrame:
     df["payable_amount"] = pd.to_numeric(df.get("payable_amount"), errors="coerce").fillna(0)
     df["gmv"] = df["payable_amount"]
 
-    for col, default in [("sku", "未知"), ("order_status", "未知"),
+    for col, default in [("sample_type", "未知"), ("sku", "未知"), ("order_status", "未知"),
                          ("product_name", "未知"), ("merchant_code", "未知")]:
         if col in df.columns:
             df[col] = df[col].astype(str).str.strip().replace(
