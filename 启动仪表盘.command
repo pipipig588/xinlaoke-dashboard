@@ -101,6 +101,21 @@ fi
 echo "❌ 关闭此窗口会停止服务，请保持此窗口开着"
 echo ""
 
+# 把「公网链接 + 密码」复制到剪贴板，并弹 Mac 通知（方便直接粘贴发给同事）
+if [ -n "$PUBLIC_URL" ]; then
+    if [ -n "$DASH_PASS" ]; then
+        CLIP="直播间销售仪表盘
+链接：$PUBLIC_URL
+密码：$DASH_PASS"
+    else
+        CLIP="直播间销售仪表盘
+链接：$PUBLIC_URL"
+    fi
+    printf '%s' "$CLIP" | pbcopy 2>/dev/null \
+        && echo "📋 公网链接+密码已复制到剪贴板，可直接粘贴发给同事" \
+        && osascript -e 'display notification "公网链接+密码已复制到剪贴板，可直接粘贴发给同事" with title "仪表盘已启动" sound name "Glass"' >/dev/null 2>&1
+fi
+
 # 自动打开本地浏览器
 open "http://localhost:8501"
 
