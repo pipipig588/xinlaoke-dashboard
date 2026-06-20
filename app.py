@@ -2112,31 +2112,35 @@ def tab_sample_repurchase(df: pd.DataFrame, df_yoy: pd.DataFrame = None, yoy_on:
 
     st.divider()
 
-    # ── 维度2：按派样购买月份（cohort）──
-    st.markdown("##### 📅 按派样购买月份（活动期 cohort）")
+    # ── 维度2：按派样购买周期（cohort，可切按月/按天，图表与下表联动）──
+    st.markdown("##### 📅 按派样购买周期（活动期 cohort）")
+    cohort_gran = st.radio("时间粒度", ["按月", "按天"], horizontal=True, key="smp_cohort_gran")
+    _cfmt = "%Y-%m" if cohort_gran == "按月" else "%Y-%m-%d"
+    _clabel = "派样购买月份" if cohort_gran == "按月" else "派样购买日期"
+
     cohort = first_smp.copy()
-    cohort["sample_ym"] = cohort["smp_time"].dt.strftime("%Y-%m")
-    buyers_by_ym = cohort.groupby("sample_ym")["user_id"].nunique().rename("买样人数")
+    cohort["period"] = cohort["smp_time"].dt.strftime(_cfmt)
+    buyers_by_p = cohort.groupby("period")["user_id"].nunique().rename("买样人数")
 
     repur_cohort = repur[["user_id"]].drop_duplicates().merge(
-        cohort[["user_id", "sample_ym"]], on="user_id", how="left")
-    repur_users_by_ym = repur_cohort.groupby("sample_ym")["user_id"].nunique().rename("回购人数")
-    orders_cohort = repur.merge(cohort[["user_id", "sample_ym"]], on="user_id", how="left")
-    repur_orders_by_ym = orders_cohort.groupby("sample_ym").size().rename("回购订单数")
+        cohort[["user_id", "period"]], on="user_id", how="left")
+    repur_users_by_p = repur_cohort.groupby("period")["user_id"].nunique().rename("回购人数")
+    orders_cohort = repur.merge(cohort[["user_id", "period"]], on="user_id", how="left")
+    repur_orders_by_p = orders_cohort.groupby("period").size().rename("回购订单数")
 
-    monthly = (
-        pd.concat([buyers_by_ym, repur_users_by_ym, repur_orders_by_ym], axis=1)
-        .fillna(0).astype(int).reset_index().sort_values("sample_ym")
+    cohort_df = (
+        pd.concat([buyers_by_p, repur_users_by_p, repur_orders_by_p], axis=1)
+        .fillna(0).astype(int).reset_index().sort_values("period")
     )
-    monthly["回购率(%)"] = (monthly["回购人数"] / monthly["买样人数"].replace(0, 1) * 100).round(2)
+    cohort_df["回购率(%)"] = (cohort_df["回购人数"] / cohort_df["买样人数"].replace(0, 1) * 100).round(2)
 
     fig = px.bar(
-        monthly, x="sample_ym", y=["买样人数", "回购人数"], barmode="group",
-        title="各派样购买月份：买样人数 vs 回购人数",
+        cohort_df, x="period", y=["买样人数", "回购人数"], barmode="group",
+        title=f"各{_clabel}：买样人数 vs 回购人数",
         color_discrete_map={"买样人数": "#45B7D1", "回购人数": "#FF6B6B"},
     )
     fig.add_scatter(
-        x=monthly["sample_ym"], y=monthly["回购率(%)"], name="回购率(%)",
+        x=cohort_df["period"], y=cohort_df["回购率(%)"], name="回购率(%)",
         mode="lines+markers", yaxis="y2", line=dict(color="#FFA94D"),
     )
     # 悬停统一显示：买样人数 / 回购人数 / 回购率
@@ -2147,14 +2151,14 @@ def tab_sample_repurchase(df: pd.DataFrame, df_yoy: pd.DataFrame = None, yoy_on:
     fig.update_traces(selector=dict(name="回购率(%)"),
                       hovertemplate="回购率 %{y:.2f}%<extra></extra>")
     fig.update_layout(
-        xaxis_title="派样购买月份", yaxis_title="人数", height=400,
+        xaxis_title=_clabel, yaxis_title="人数", height=400,
         xaxis=dict(type="category"),
         hovermode="x unified",
         yaxis2=dict(title="回购率(%)", overlaying="y", side="right", showgrid=False),
     )
     st.plotly_chart(fig, use_container_width=True)
     st.dataframe(
-        monthly.rename(columns={"sample_ym": "派样购买月份"}),
+        cohort_df.rename(columns={"period": _clabel}),
         use_container_width=True, hide_index=True,
     )
 
@@ -2252,10 +2256,10 @@ def tab_sample_repurchase(df: pd.DataFrame, df_yoy: pd.DataFrame = None, yoy_on:
         key="smp_dl_detail",
     )
     cdc.download_button(
-        "📥 下载月度 cohort CSV",
-        data=monthly.to_csv(index=False).encode("utf-8-sig"),
-        file_name="sample_repurchase_monthly.csv", mime="text/csv",
-        key="smp_dl_monthly",
+        "📥 下载 cohort CSV",
+        data=cohort_df.rename(columns={"period": _clabel}).to_csv(index=False).encode("utf-8-sig"),
+        file_name="sample_repurchase_cohort.csv", mime="text/csv",
+        key="smp_dl_cohort",
     )
 
 
