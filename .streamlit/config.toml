@@ -1,3 +1,7 @@
+[client]
+# minimal：隐藏右上角菜单/Deploy 按钮，并关闭 C(清缓存)/R(重运行) 等开发者快捷键
+toolbarMode = "minimal"
+
 [theme]
 primaryColor = "#FF6B6B"
 backgroundColor = "#FFFFFF"

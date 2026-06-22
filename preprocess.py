@@ -21,6 +21,7 @@ from config import (
     MEMBER_FILE_KEYWORD,
     OLD_CUSTOMER_MIN_AMOUNT,
     OLD_CUSTOMER_MIN_DAYS,
+    OLD_CUSTOMER_R12_DEFAULT,
     ORDERS_FILE_KEYWORD,
     PROCESSED_DATA_DIR,
     RAW_DATA_DIR,
@@ -232,8 +233,8 @@ def label_customer_type(df: pd.DataFrame) -> pd.DataFrame:
     n_old = (df["customer_type"] == "老客").sum()
     print(f"  新客订单: {n_new:,}  |  老客订单: {n_old:,}")
 
-    # ── R12 老客：默认9999天（≈全时段），侧边栏可调 ──
-    print("  计算 R12 老客标签（滚动9999天，默认等同全时段）...")
+    # ── R12 老客：回溯窗口 = config.OLD_CUSTOMER_R12_DEFAULT 天（默认9999≈全时段），侧边栏可调 ──
+    print(f"  计算 R12 老客标签（滚动 {OLD_CUSTOMER_R12_DEFAULT} 天）...")
     df["customer_type_r12"] = "新客"
 
     users_with_qualifying = set(qualifying["user_id"].unique())
@@ -247,7 +248,7 @@ def label_customer_type(df: pd.DataFrame) -> pd.DataFrame:
     cross["days_diff"] = (cross["pay_time"] - cross["q_time"]).dt.days
     in_window = cross[
         (cross["days_diff"] >= OLD_CUSTOMER_MIN_DAYS) &
-        (cross["days_diff"] <= 9999)
+        (cross["days_diff"] <= OLD_CUSTOMER_R12_DEFAULT)
     ]
     r12_old_orig_idx = in_window["index"].unique()
     df.loc[r12_old_orig_idx, "customer_type_r12"] = "老客"

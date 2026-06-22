@@ -30,12 +30,18 @@ COLUMN_MAP = {
     "crowd_name":        "人群名称",       # 人群表：人群/包名
 }
 
-# ── 老客判定规则 ──────────────────────────────────────────────────────────────
-# 历史有过 >= OLD_CUSTOMER_MIN_AMOUNT 元、订单状态属于 TRANSACTION_SUCCESS_STATUSES
-# 且时间早于当前订单至少 OLD_CUSTOMER_MIN_DAYS 天，则当前订单标记为老客
-OLD_CUSTOMER_MIN_AMOUNT    = 550        # 元
-OLD_CUSTOMER_MIN_DAYS      = 1          # 天
-# 判定为"有效历史成交"的订单状态：已完成 / 已发货 / 待发货（即排除"已关闭"）
+# ── 老客判定规则（★多业务组只改这一块，改完重跑 python preprocess.py 即可）────────
+# 「老客」定义：历史有过 >= OLD_CUSTOMER_MIN_AMOUNT 元、订单状态属于 TRANSACTION_SUCCESS_STATUSES、
+# 且时间早于当前订单至少 OLD_CUSTOMER_MIN_DAYS 天、并落在最近 OLD_CUSTOMER_R12_DEFAULT 天回溯窗口内的成交。
+# 例：海蓝之谜 = 550 / 已完成+已发货+待发货 / 不限时间(9999)
+#     雅诗兰黛 = 200 / 仅已完成 / 365 天   → 改成：
+#       OLD_CUSTOMER_MIN_AMOUNT = 200
+#       TRANSACTION_SUCCESS_STATUSES = ["已完成"]
+#       OLD_CUSTOMER_R12_DEFAULT = 365
+OLD_CUSTOMER_MIN_AMOUNT    = 550        # 元（有效成交最低金额）
+OLD_CUSTOMER_MIN_DAYS      = 1          # 天（历史订单需早于当前订单至少 N 天）
+OLD_CUSTOMER_R12_DEFAULT   = 9999       # 天（R12 回溯窗口；9999≈27年≈全时段）
+# 判定为"有效历史成交"的订单状态集合（排除"已关闭"）。只认已完成则填 ["已完成"]。
 TRANSACTION_SUCCESS_STATUSES = ["已完成", "已发货", "待发货"]
 TRANSACTION_SUCCESS_STATUS = "已完成"   # 兼容旧引用（单值，保留）
 

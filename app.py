@@ -15,6 +15,13 @@ import plotly.graph_objects as go
 import streamlit as st
 import streamlit.components.v1 as components
 
+from config import (
+    OLD_CUSTOMER_MIN_AMOUNT,
+    OLD_CUSTOMER_MIN_DAYS,
+    OLD_CUSTOMER_R12_DEFAULT,
+    TRANSACTION_SUCCESS_STATUSES,
+)
+
 # 平台优惠 "券名-金额" 提取（贪婪 + 末尾数字，支持千分位逗号）
 COUPON_RE = re.compile(r"^(.+)-([\d,]+(?:\.\d+)?)$")
 
@@ -211,13 +218,16 @@ def render_sidebar(meta: dict) -> dict:
         key="old_cust_channels",
     )
     old_cust_amount = st.sidebar.number_input(
-        "有效成交最低金额（元）", value=550, min_value=0, step=50, key="old_cust_amount"
+        "有效成交最低金额（元）", value=int(OLD_CUSTOMER_MIN_AMOUNT), min_value=0, step=50,
+        key="old_cust_amount"
     )
     old_cust_days = st.sidebar.number_input(
-        "历史订单早于当前至少（天）", value=1, min_value=1, step=1, key="old_cust_days"
+        "历史订单早于当前至少（天）", value=int(OLD_CUSTOMER_MIN_DAYS), min_value=1, step=1,
+        key="old_cust_days"
     )
     r12_window = st.sidebar.number_input(
-        "R12 回溯窗口（天）", value=9999, min_value=30, step=30, key="r12_window"
+        "R12 回溯窗口（天）", value=int(OLD_CUSTOMER_R12_DEFAULT), min_value=30, step=30,
+        key="r12_window"
     )
     st.sidebar.caption("9999天≈27年，相当于不限时间（全时段）")
 
@@ -263,8 +273,8 @@ def recompute_customer_type(
     df["order_date"] = pd.to_datetime(df["order_date"])
     df["pay_time"]   = pd.to_datetime(df["pay_time"])
 
-    # ── 全时段老客（成交状态 ∈ 已完成/已发货/待发货，排除已关闭）──
-    q_mask = (df["order_status"].isin(["已完成", "已发货", "待发货"])) & (df["gmv"] >= min_amount)
+    # ── 全时段老客（成交状态集合见 config.TRANSACTION_SUCCESS_STATUSES，排除已关闭）──
+    q_mask = (df["order_status"].isin(TRANSACTION_SUCCESS_STATUSES)) & (df["gmv"] >= min_amount)
     if channels:  # 限定渠道
         q_mask &= df["channel_type"].isin(channels)
     qualifying = df[q_mask][["user_id", "pay_time"]].copy()
@@ -2566,17 +2576,20 @@ def main():
     st.title("📊 直播间销售数据分析")
 
     # 拦截 Cmd/Ctrl+C：避免复制文本时触发 Streamlit 的「Clear caches」快捷键弹窗。
-    # 捕获阶段 stopImmediatePropagation 抢在 Streamlit 监听器之前，但不 preventDefault，
-    # 浏览器原生复制仍然正常。
+    # 同时挂在 window 与 document 的「捕获阶段」——window 级 capture 是事件最先经过的环节，
+    # 抢在 Streamlit 的监听器之前 stopImmediatePropagation（Windows 上 Streamlit 多挂在 window，
+    # 仅 document 级拦不住，故补一层 window）。不 preventDefault，浏览器原生复制仍正常。
     components.html(
         """
 <script>
-const doc = window.parent.document;
-doc.addEventListener('keydown', function(e){
+const w = window.parent;
+function blockClearCache(e){
   if ((e.key === 'c' || e.key === 'C') && (e.metaKey || e.ctrlKey)) {
     e.stopImmediatePropagation();
   }
-}, true);
+}
+w.addEventListener('keydown', blockClearCache, true);
+w.document.addEventListener('keydown', blockClearCache, true);
 </script>
 """,
         height=0,
@@ -2609,7 +2622,9 @@ doc.addEventListener('keydown', function(e){
 
     f  = render_sidebar(meta)
 
-    default_amount, default_days, default_r12, default_channels = 550, 1, 9999, ()
+    default_amount, default_days, default_r12, default_channels = (
+        OLD_CUSTOMER_MIN_AMOUNT, OLD_CUSTOMER_MIN_DAYS, OLD_CUSTOMER_R12_DEFAULT, ()
+    )
     sel_channels = tuple(sorted(f["old_cust_channels"]))
     need_recompute = (
         f["old_cust_amount"] != default_amount or
