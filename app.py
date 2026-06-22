@@ -742,18 +742,36 @@ def _build_trend_daily(df: pd.DataFrame, date_col: str, count_mode,
     if "GMV" in count_mode:
         return df.groupby(grp_cols)["gmv"].sum().reset_index(name="value")
     elif "人数" in count_mode:
-        return df.groupby(grp_cols)["user_id"].nunique().reset_index(name="value")
+        # 人数按互斥口径(与表头一致)：每个周期内有任意新客订单=新客，否则=老客；
+        # 这样 新客+老客 = 该周期去重人数，不会因「同人既有新客单又有老客单」重复计。
+        keys = [date_col] + ([channel_col] if by_channel and channel_col else [])
+        total_p = df.groupby(keys)["user_id"].nunique().rename("value")
+        new_p = (df[df["customer_type"] == "新客"].groupby(keys)["user_id"].nunique()
+                 .reindex(total_p.index, fill_value=0))
+        new_df = new_p.rename("value").reset_index(); new_df["customer_type"] = "新客"
+        old_df = (total_p - new_p).rename("value").reset_index(); old_df["customer_type"] = "老客"
+        return pd.concat([new_df, old_df], ignore_index=True)[keys + ["customer_type", "value"]]
     else:
         return df.groupby(grp_cols).size().reset_index(name="value")
 
 
 def _build_summary_table(df: pd.DataFrame) -> pd.DataFrame:
-    """生成 全店/新客/老客 × 订单数/人数/GMV/客单价 的汇总表"""
+    """生成 全店/新客/老客 × 订单数/人数/GMV/客单价 的汇总表。
+    人数按互斥口径(与表头一致)：有任意新客订单=新客，否则=老客 → 新客+老客=全店去重人数。"""
+    user_type = (
+        df.groupby("user_id")["customer_type"]
+        .apply(lambda s: "新客" if "新客" in s.values else "老客")
+    )
+    persons_map = {
+        "全店": len(user_type),
+        "新客": int((user_type == "新客").sum()),
+        "老客": int((user_type == "老客").sum()),
+    }
     rows = []
     for label, subset in [("全店", df), ("新客", df[df["customer_type"] == "新客"]),
                            ("老客", df[df["customer_type"] == "老客"])]:
         orders  = len(subset)
-        persons = subset["user_id"].nunique()
+        persons = persons_map[label]
         gmv     = subset["gmv"].sum()
         arpu    = round(gmv / persons, 0) if persons > 0 else 0.0
         rows.append({
