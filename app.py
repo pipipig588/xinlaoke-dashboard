@@ -1555,7 +1555,9 @@ def tab_rfm(df: pd.DataFrame, orders_all: pd.DataFrame, f: dict):
     st.caption(
         "**老客基数 = 截止日前「购买过」（≥550 且成交：已完成/已发货/待发货，排除已关闭）的去重用户**，"
         "每人按最近一次购买落入一个 R 桶、只算一次，各桶相加 = 基数总数。"
-        "**回购率 = 该桶里在回购窗口内又购买的比例**。渠道范围由上方「老客基数渠道」控制（不受左侧全局渠道筛选影响）。"
+        "**回购率 = 该桶里在回购窗口内、且符合左侧全局筛选(如自营)又购买的比例**。"
+        "分工：**「老客基数渠道」只决定基数池是哪些渠道的客户**；**回购走左侧全局筛选**。"
+        "👉 想让回购人数对齐表头老客，**老客基数渠道选「全部」**(因表头按全渠道历史判定老客)。"
     )
 
     # ── 渠道由本 RFM 选择器控制；状态用「成交」集合(不受全局状态筛选)；金额≥老客门槛；时间另算 ──
@@ -1584,8 +1586,10 @@ def tab_rfm(df: pd.DataFrame, orders_all: pd.DataFrame, f: dict):
     ).reset_index()
     user_summary["R_days"] = (cutoff_ts - user_summary["last_pay"]).dt.days
 
-    # 回购：cutoff < pay_time <= repurch_end（同一渠道/成交口径）
-    df_repurch = scoped[(scoped["pay_time"] > cutoff_ts) & (scoped["pay_time"] <= repurch_end_ts)]
+    # 回购：在「左侧全局筛选」范围内(本期)又购买的人 —— df 已是全局筛选(渠道/状态/时间范围)后的订单。
+    # 注意：回购走全局筛选(如自营)，老客基数渠道只决定"基数池"是哪些渠道的客户，二者分工不同；
+    # 这样「老客基数渠道=全部」时，回购人数 ≈ 表头老客(全局自营口径)。
+    df_repurch = df[(df["pay_time"] > cutoff_ts) & (df["pay_time"] <= repurch_end_ts)]
     repurch_users = set(df_repurch["user_id"].unique())
     user_summary["is_repurch"] = user_summary["user_id"].isin(repurch_users).astype(int)
 
