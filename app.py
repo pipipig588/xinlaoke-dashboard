@@ -734,13 +734,15 @@ def tab_channel_summary(df: pd.DataFrame, df_yoy: pd.DataFrame, yoy_on: bool, f:
 # Tab 1：新老客趋势（含同比 + 汇总表）
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _build_trend_daily(df: pd.DataFrame, date_col: str, val_col,
+def _build_trend_daily(df: pd.DataFrame, date_col: str, count_mode,
                        by_channel: bool, channel_col: str = "influencer_name") -> pd.DataFrame:
     grp_cols = [date_col, "customer_type"]
     if by_channel and channel_col:
         grp_cols = [date_col, channel_col, "customer_type"]
-    if val_col:
+    if "GMV" in count_mode:
         return df.groupby(grp_cols)["gmv"].sum().reset_index(name="value")
+    elif "人数" in count_mode:
+        return df.groupby(grp_cols)["user_id"].nunique().reset_index(name="value")
     else:
         return df.groupby(grp_cols).size().reset_index(name="value")
 
@@ -769,12 +771,11 @@ def tab_trend(df: pd.DataFrame, df_yoy: pd.DataFrame, yoy_on: bool, f: dict):
 
     col1, col2, col3 = st.columns(3)
     time_mode  = col1.radio("时间粒度", ["按天", "按月"], horizontal=True, key="t1_time")
-    count_mode = col2.radio("计量指标", ["订单数", "GMV（元）"], horizontal=True, key="t1_count")
+    count_mode = col2.radio("计量指标", ["订单数", "GMV（元）", "人数"], horizontal=True, key="t1_count")
     show_pct   = col3.checkbox("显示占比 %", value=False, key="t1_pct")
     by_channel = st.checkbox("分渠道展示", value=False, key="t1_channel")
 
     date_col = "order_date" if time_mode == "按天" else "order_ym"
-    val_col  = "gmv" if "GMV" in count_mode else None
 
     if by_channel:
         if f.get("sel_influencers"):
@@ -790,7 +791,7 @@ def tab_trend(df: pd.DataFrame, df_yoy: pd.DataFrame, yoy_on: bool, f: dict):
         channel_col = None
         channel_label = ""
 
-    daily = _build_trend_daily(df, date_col, val_col, by_channel, channel_col)
+    daily = _build_trend_daily(df, date_col, count_mode, by_channel, channel_col)
     has_yoy = yoy_on and not df_yoy.empty
 
     if show_pct:
@@ -807,7 +808,7 @@ def tab_trend(df: pd.DataFrame, df_yoy: pd.DataFrame, yoy_on: bool, f: dict):
         st.caption(f"📊 当前分渠道维度：**{channel_label}**")
 
     if has_yoy:
-        daily_yoy = _build_trend_daily(df_yoy, date_col, val_col, by_channel, channel_col)
+        daily_yoy = _build_trend_daily(df_yoy, date_col, count_mode, by_channel, channel_col)
 
         if show_pct:
             tot_y = daily_yoy.groupby(grp_keys)["value"].transform("sum")
@@ -951,16 +952,28 @@ def tab_trend(df: pd.DataFrame, df_yoy: pd.DataFrame, yoy_on: bool, f: dict):
             use_container_width=True, hide_index=True,
         )
 
-    with st.expander("查看分渠道汇总数据"):
-        pivot_cols = ([channel_col, "customer_type"] if by_channel and channel_col
-                      else ["customer_type"])
-        detail = df.groupby(pivot_cols).agg(
+    _period_label = "日期" if date_col == "order_date" else "月份"
+    with st.expander(f"查看明细数据（按{_period_label}，可下载）"):
+        detail_keys = ([date_col] + ([channel_col] if by_channel and channel_col else [])
+                       + ["customer_type"])
+        detail = df.groupby(detail_keys).agg(
             订单数=("gmv", "count"),
             GMV=("gmv", "sum"),
-            独立买家=("user_id", "nunique"),
-        ).reset_index()
+            人数=("user_id", "nunique"),
+        ).reset_index().sort_values(detail_keys)
         detail["GMV"] = detail["GMV"].round(2)
-        st.dataframe(detail, use_container_width=True)
+        detail[date_col] = detail[date_col].astype(str)
+        rename_map = {date_col: _period_label, "customer_type": "客户类型"}
+        if by_channel and channel_col:
+            rename_map[channel_col] = channel_label
+        detail = detail.rename(columns=rename_map)
+        st.dataframe(detail, use_container_width=True, hide_index=True)
+        st.download_button(
+            "📥 下载明细 CSV",
+            data=detail.to_csv(index=False).encode("utf-8-sig"),
+            file_name=f"trend_detail_{'day' if date_col == 'order_date' else 'month'}.csv",
+            mime="text/csv", key="t1_dl_detail",
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1502,11 +1515,22 @@ def tab_rfm(df: pd.DataFrame, orders_all: pd.DataFrame, f: dict):
         f"　·　分析截止日：**{cutoff_ts.strftime('%Y-%m-%d')}**"
     )
 
+    # ── 老客基数渠道选择（自营 / 达播 / 都算）──
+    rfm_chan = []
+    if "channel_type" in orders_all.columns:
+        chan_opts = sorted([c for c in orders_all["channel_type"].dropna().unique().tolist() if c])
+        rfm_chan = st.multiselect(
+            "老客基数渠道（不选 = 全部）", chan_opts, default=[], key="rfm_chan",
+            help="按渠道类型圈定老客基数人群（如只看自营老客 / 达播老客）；同时作用于回购判定，口径一致。",
+        )
+
     # ── 截止日前的全量行为：不受时间范围限制，但其他筛选保留 ──
     # 用 orders_all（全量订单）+ 重新跑除"时间范围"以外的过滤
     f_no_date = dict(f)
     f_no_date["date_range"] = ()  # 关掉时间范围过滤
     history = _base_filter(orders_all, f_no_date, ())
+    if rfm_chan:
+        history = history[history["channel_type"].isin(rfm_chan)]
     df_before = history[history["pay_time"] <= cutoff_ts]
     if df_before.empty:
         st.info("分析截止日之前没有数据，请调整截止日或筛选条件。")
@@ -1519,8 +1543,10 @@ def tab_rfm(df: pd.DataFrame, orders_all: pd.DataFrame, f: dict):
     ).reset_index()
     user_summary["R_days"] = (cutoff_ts - user_summary["last_pay"]).dt.days
 
-    # 回购：cutoff < pay_time <= repurch_end
+    # 回购：cutoff < pay_time <= repurch_end（与老客基数渠道口径保持一致）
     df_repurch = df[(df["pay_time"] > cutoff_ts) & (df["pay_time"] <= repurch_end_ts)]
+    if rfm_chan and "channel_type" in df_repurch.columns:
+        df_repurch = df_repurch[df_repurch["channel_type"].isin(rfm_chan)]
     repurch_users = set(df_repurch["user_id"].unique())
     user_summary["is_repurch"] = user_summary["user_id"].isin(repurch_users).astype(int)
 
