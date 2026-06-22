@@ -1515,25 +1515,38 @@ def tab_rfm(df: pd.DataFrame, orders_all: pd.DataFrame, f: dict):
         f"　·　分析截止日：**{cutoff_ts.strftime('%Y-%m-%d')}**"
     )
 
-    # ── 老客基数渠道选择（自营 / 达播 / 都算）──
+    # ── 老客基数渠道选择（自营 / 达播 / 都算；独立于左侧全局渠道筛选）──
     rfm_chan = []
     if "channel_type" in orders_all.columns:
         chan_opts = sorted([c for c in orders_all["channel_type"].dropna().unique().tolist() if c])
         rfm_chan = st.multiselect(
             "老客基数渠道（不选 = 全部）", chan_opts, default=[], key="rfm_chan",
-            help="按渠道类型圈定老客基数人群（如只看自营老客 / 达播老客）；同时作用于回购判定，口径一致。",
+            help="圈定老客基数人群所在渠道（如只看自营老客 / 达播老客 / 都算）；"
+                 "此处独立于左侧「渠道类型」筛选——左侧选自营、这里全选，则按所有渠道的老客算。",
         )
+    st.caption(
+        "**老客基数 = 截止日前已是「老客」（>550 且已完成，按左侧老客判定规则）的人**，每人按最近一次购买"
+        "落入一个 R 桶、只算一次，各桶相加 = 老客总数。渠道范围由上方「老客基数渠道」控制（不受左侧全局渠道筛选影响）。"
+    )
 
-    # ── 截止日前的全量行为：不受时间范围限制，但其他筛选保留 ──
-    # 用 orders_all（全量订单）+ 重新跑除"时间范围"以外的过滤
-    f_no_date = dict(f)
-    f_no_date["date_range"] = ()  # 关掉时间范围过滤
-    history = _base_filter(orders_all, f_no_date, ())
+    # ── 渠道范围由本 RFM 选择器控制（剥离左侧全局渠道/达人筛选），时间范围另算 ──
+    f_rfm = dict(f)
+    f_rfm["date_range"] = ()
+    f_rfm["sel_channel_types"] = []
+    f_rfm["sel_influencers"] = []
+    scoped = _base_filter(orders_all, f_rfm, ())
     if rfm_chan:
-        history = history[history["channel_type"].isin(rfm_chan)]
-    df_before = history[history["pay_time"] <= cutoff_ts]
+        scoped = scoped[scoped["channel_type"].isin(rfm_chan)]
+
+    df_before = scoped[scoped["pay_time"] <= cutoff_ts]
     if df_before.empty:
         st.info("分析截止日之前没有数据，请调整截止日或筛选条件。")
+        return
+
+    # 老客基数 = 截止日前为老客(customer_type_r12==老客)的去重用户；R/F/M 按其截止日前全部历史计算
+    laoke_users = set(df_before.loc[df_before["customer_type_r12"] == "老客", "user_id"])
+    if not laoke_users:
+        st.info("当前条件下，截止日前没有符合「老客」(>550且已完成)的用户。")
         return
 
     user_summary = df_before.groupby("user_id").agg(
@@ -1541,12 +1554,11 @@ def tab_rfm(df: pd.DataFrame, orders_all: pd.DataFrame, f: dict):
         order_count=("pay_time", "count"),
         total_gmv=("gmv", "sum"),
     ).reset_index()
+    user_summary = user_summary[user_summary["user_id"].isin(laoke_users)]
     user_summary["R_days"] = (cutoff_ts - user_summary["last_pay"]).dt.days
 
-    # 回购：cutoff < pay_time <= repurch_end（与老客基数渠道口径保持一致）
-    df_repurch = df[(df["pay_time"] > cutoff_ts) & (df["pay_time"] <= repurch_end_ts)]
-    if rfm_chan and "channel_type" in df_repurch.columns:
-        df_repurch = df_repurch[df_repurch["channel_type"].isin(rfm_chan)]
+    # 回购：cutoff < pay_time <= repurch_end（同一渠道口径）
+    df_repurch = scoped[(scoped["pay_time"] > cutoff_ts) & (scoped["pay_time"] <= repurch_end_ts)]
     repurch_users = set(df_repurch["user_id"].unique())
     user_summary["is_repurch"] = user_summary["user_id"].isin(repurch_users).astype(int)
 
