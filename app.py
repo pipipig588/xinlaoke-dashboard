@@ -554,6 +554,10 @@ def _channel_agg(df: pd.DataFrame, group_col: str = "channel_type") -> pd.DataFr
     out = base.merge(new_agg, on=group_col, how="left") \
               .merge(old_agg, on=group_col, how="left").fillna(0)
 
+    # 人数按互斥口径(与表头KPI一致)：新客=有任意新客订单的人，老客=人数−新客(无新客订单的人)。
+    # 订单数/GMV 仍为订单级(新客单/老客单)，不变。
+    out["老客人数"] = (out["人数"] - out["新客人数"]).clip(lower=0)
+
     out["客单价"]    = (out["GMV"] / out["人数"].replace(0, 1)).round(0)
     out["购买频次"]  = (out["订单数"] / out["人数"].replace(0, 1)).round(2)
     out["新客占比%"] = (out["新客人数"] / out["人数"].replace(0, 1) * 100).round(1)
@@ -1031,7 +1035,13 @@ def tab_product(df: pd.DataFrame):
     for ct in ("新客", "老客"):
         if ct not in sku_pivot.columns:
             sku_pivot[ct] = 0.0
-    sku_pivot["total"]    = sku_pivot["新客"] + sku_pivot["老客"]
+    if use_gmv:
+        sku_pivot["total"] = sku_pivot["新客"] + sku_pivot["老客"]
+    else:
+        # 人数：互斥口径(与表头一致)。新客=有任意新客单的人；老客=该货号去重人数−新客，
+        # 避免「同货号既有新单又有老单」的人被新客/老客重复计。
+        sku_pivot["total"] = sku_total.set_index("sku")["total"].reindex(sku_pivot.index).fillna(0)
+        sku_pivot["老客"]  = (sku_pivot["total"] - sku_pivot["新客"]).clip(lower=0)
     sku_pivot["新客_pct"] = sku_pivot["新客"] / sku_pivot["total"].replace(0, 1) * 100
     sku_pivot["老客_pct"] = sku_pivot["老客"] / sku_pivot["total"].replace(0, 1) * 100
     sku_pivot = sku_pivot.reindex(sku_order)
