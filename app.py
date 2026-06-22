@@ -2576,11 +2576,11 @@ def main():
     st.title("📊 直播间销售数据分析")
 
     # 拦截 Cmd/Ctrl+C：避免复制文本时触发 Streamlit 的「Clear caches」快捷键弹窗。
-    # 同时挂在 window 与 document 的「捕获阶段」——window 级 capture 是事件最先经过的环节，
-    # 抢在 Streamlit 的监听器之前 stopImmediatePropagation（Windows 上 Streamlit 多挂在 window，
-    # 仅 document 级拦不住，故补一层 window）。不 preventDefault，浏览器原生复制仍正常。
-    components.html(
-        """
+    # 挂在 window 与 document 的「捕获阶段」抢在 Streamlit 监听器之前 stopImmediatePropagation，
+    # 不 preventDefault，浏览器原生复制仍正常。（toolbarMode=minimal 已是主防线，这里是双保险。）
+    # 注入 JS 需要 iframe 组件：新版 Streamlit 用 st.iframe，旧版用 components.html；
+    # 都不可用时静默跳过（仅靠 toolbarMode），避免新版移除旧接口后报错。
+    _kbd_js = """
 <script>
 const w = window.parent;
 function blockClearCache(e){
@@ -2591,9 +2591,12 @@ function blockClearCache(e){
 w.addEventListener('keydown', blockClearCache, true);
 w.document.addEventListener('keydown', blockClearCache, true);
 </script>
-""",
-        height=0,
-    )
+"""
+    try:
+        _iframe_fn = getattr(st, "iframe", None) or components.html
+        _iframe_fn(_kbd_js, height=0)
+    except Exception:
+        pass
 
     st.markdown("""
 <style>
