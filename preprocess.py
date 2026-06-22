@@ -27,6 +27,7 @@ from config import (
     SAMPLE_FILE_KEYWORD,
     SANKEY_MIN_COUNT,
     TRANSACTION_SUCCESS_STATUS,
+    TRANSACTION_SUCCESS_STATUSES,
 )
 
 
@@ -189,9 +190,9 @@ def clean(df: pd.DataFrame) -> pd.DataFrame:
 def label_customer_type(df: pd.DataFrame) -> pd.DataFrame:
     df = df.sort_values(["user_id", "pay_time"]).reset_index(drop=True)
 
-    # 找有效历史成交记录
+    # 找有效历史成交记录（状态 ∈ 已完成/已发货/待发货，排除已关闭）
     qualifying = df[
-        (df["order_status"] == TRANSACTION_SUCCESS_STATUS) &
+        (df["order_status"].isin(TRANSACTION_SUCCESS_STATUSES)) &
         (df["gmv"] >= OLD_CUSTOMER_MIN_AMOUNT)
     ].copy()
 

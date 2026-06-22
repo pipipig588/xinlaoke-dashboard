@@ -263,8 +263,8 @@ def recompute_customer_type(
     df["order_date"] = pd.to_datetime(df["order_date"])
     df["pay_time"]   = pd.to_datetime(df["pay_time"])
 
-    # ── 全时段老客 ──
-    q_mask = (df["order_status"] == "已完成") & (df["gmv"] >= min_amount)
+    # ── 全时段老客（成交状态 ∈ 已完成/已发货/待发货，排除已关闭）──
+    q_mask = (df["order_status"].isin(["已完成", "已发货", "待发货"])) & (df["gmv"] >= min_amount)
     if channels:  # 限定渠道
         q_mask &= df["channel_type"].isin(channels)
     qualifying = df[q_mask][["user_id", "pay_time"]].copy()
@@ -1231,7 +1231,7 @@ def _calc_repurchase(df_base: pd.DataFrame, pairs_base: pd.DataFrame,
 
 def tab_repurchase_rate(df: pd.DataFrame, pairs: pd.DataFrame):
     st.subheader("老客复购率分析")
-    st.caption("老客定义以左侧侧边栏「⚙️ 老客判定规则」为准，默认：历史任意时间有过已完成且 ≥550元 的订单即为老客。")
+    st.caption("老客定义以左侧侧边栏「⚙️ 老客判定规则」为准，默认：历史任意时间有过 ≥550元 且成交(已完成/已发货/待发货，排除已关闭)的订单即为老客。")
 
     ct_col = "customer_type_r12"
     df    = df.copy()
@@ -1525,7 +1525,7 @@ def tab_rfm(df: pd.DataFrame, orders_all: pd.DataFrame, f: dict):
                  "此处独立于左侧「渠道类型」筛选——左侧选自营、这里全选，则按所有渠道的老客算。",
         )
     st.caption(
-        "**老客基数 = 截止日前已是「老客」（>550 且已完成，按左侧老客判定规则）的人**，每人按最近一次购买"
+        "**老客基数 = 截止日前已是「老客」（≥550 且成交：已完成/已发货/待发货，排除已关闭）的人**，每人按最近一次购买"
         "落入一个 R 桶、只算一次，各桶相加 = 老客总数。渠道范围由上方「老客基数渠道」控制（不受左侧全局渠道筛选影响）。"
     )
 
@@ -1546,7 +1546,7 @@ def tab_rfm(df: pd.DataFrame, orders_all: pd.DataFrame, f: dict):
     # 老客基数 = 截止日前为老客(customer_type_r12==老客)的去重用户；R/F/M 按其截止日前全部历史计算
     laoke_users = set(df_before.loc[df_before["customer_type_r12"] == "老客", "user_id"])
     if not laoke_users:
-        st.info("当前条件下，截止日前没有符合「老客」(>550且已完成)的用户。")
+        st.info("当前条件下，截止日前没有符合「老客」(≥550且成交,排除已关闭)的用户。")
         return
 
     user_summary = df_before.groupby("user_id").agg(

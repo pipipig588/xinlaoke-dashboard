@@ -31,11 +31,13 @@ COLUMN_MAP = {
 }
 
 # ── 老客判定规则 ──────────────────────────────────────────────────────────────
-# 历史有过 >= OLD_CUSTOMER_MIN_AMOUNT 元、订单状态=TRANSACTION_SUCCESS_STATUS
+# 历史有过 >= OLD_CUSTOMER_MIN_AMOUNT 元、订单状态属于 TRANSACTION_SUCCESS_STATUSES
 # 且时间早于当前订单至少 OLD_CUSTOMER_MIN_DAYS 天，则当前订单标记为老客
 OLD_CUSTOMER_MIN_AMOUNT    = 550        # 元
 OLD_CUSTOMER_MIN_DAYS      = 1          # 天
-TRANSACTION_SUCCESS_STATUS = "已完成"   # 判定为"有效历史成交"的订单状态值
+# 判定为"有效历史成交"的订单状态：已完成 / 已发货 / 待发货（即排除"已关闭"）
+TRANSACTION_SUCCESS_STATUSES = ["已完成", "已发货", "待发货"]
+TRANSACTION_SUCCESS_STATUS = "已完成"   # 兼容旧引用（单值，保留）
 
 # ── 金额字段选择 ──────────────────────────────────────────────────────────────
 # "payable_amount"（订单应付金额，实付）或 "item_amount"（商品金额，原价）
