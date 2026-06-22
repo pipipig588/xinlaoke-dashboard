@@ -1652,9 +1652,9 @@ def tab_rfm(df: pd.DataFrame, orders_all: pd.DataFrame, f: dict):
     cross["R_bucket"] = pd.Categorical(cross["R_bucket"], categories=r_order, ordered=True)
     cross["F_bucket"] = pd.Categorical(cross["F_bucket"], categories=f_order, ordered=True)
 
-    rate_pivot = cross.pivot(index="R_bucket", columns="F_bucket", values="回购率").reindex(r_order)[f_order]
-    base_pivot = cross.pivot(index="R_bucket", columns="F_bucket", values="基数").reindex(r_order)[f_order]
-    repu_pivot = cross.pivot(index="R_bucket", columns="F_bucket", values="回购").reindex(r_order)[f_order]
+    rate_pivot = cross.pivot(index="R_bucket", columns="F_bucket", values="回购率").reindex(index=r_order, columns=f_order)
+    base_pivot = cross.pivot(index="R_bucket", columns="F_bucket", values="基数").reindex(index=r_order, columns=f_order)
+    repu_pivot = cross.pivot(index="R_bucket", columns="F_bucket", values="回购").reindex(index=r_order, columns=f_order)
 
     custom = []
     for i in range(len(rate_pivot.index)):
