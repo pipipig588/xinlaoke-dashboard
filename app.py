@@ -1862,6 +1862,220 @@ def _parse_platform_discount(df: pd.DataFrame) -> pd.DataFrame:
     return out[["row_idx", "coupon", "amount"]]
 
 
+def tab_old_customer_source(df: pd.DataFrame, orders: pd.DataFrame, f: dict):
+    """货品老客来源倒查：锁定目标品类/货号的老客，回溯其本期开始日之前的历史来源与品类。"""
+    st.subheader("货品老客来源倒查")
+    st.caption(
+        "倒查逻辑：在左侧全局时间段内，先锁定某**品类/货号的老客**，再回溯这批人在"
+        "**本期开始日之前**的历史购买——他们当初来自哪些渠道/直播间、历史买过哪些品类。"
+        "与「货品分析」(从历史往后推算老客占比) 方向相反。"
+    )
+
+    if df.empty:
+        st.info("没有符合筛选条件的数据")
+        return
+
+    # ── ① 选择倒查目标（品类为主，可下钻货号）──────────────────────────────
+    cat_old = (
+        df[df["customer_type"] == "老客"]
+        .groupby("category")["user_id"].nunique()
+        .sort_values(ascending=False)
+    )
+    if cat_old.empty:
+        st.info("当前筛选下没有老客，无法倒查。")
+        return
+
+    c1, c2 = st.columns([1, 1])
+    target_cat = c1.selectbox(
+        "① 目标品类",
+        cat_old.index.tolist(),
+        format_func=lambda c: f"{c}（老客 {int(cat_old[c]):,} 人）",
+        key="ocs_cat",
+    )
+
+    cat_df = df[df["category"] == target_cat]
+    sku_opts = (
+        cat_df.groupby("sku")["user_id"].nunique().sort_values(ascending=False).index.tolist()
+    )
+    target_skus = c2.multiselect(
+        "② 下钻货号（可选，留空 = 整个品类）", sku_opts, default=[], key="ocs_sku"
+    )
+    target_df = cat_df if not target_skus else cat_df[cat_df["sku"].isin(target_skus)]
+
+    # ── 锁定目标老客 ──────────────────────────────────────────────────────
+    old_users = target_df.loc[target_df["customer_type"] == "老客", "user_id"].unique()
+    n_old   = len(old_users)
+    n_total = target_df["user_id"].nunique()
+    if n_old == 0:
+        st.info("该目标在当前时间段内没有老客。")
+        return
+
+    # ── 历史回溯：本期开始日之前的全部购买 ─────────────────────────────────
+    if len(f["date_range"]) != 2:
+        st.warning("请在左侧选择一个完整的时间范围（起始 + 结束）。")
+        return
+    win_start = pd.Timestamp(f["date_range"][0])
+    hist = orders[
+        orders["user_id"].isin(old_users) & (orders["order_date"] < win_start)
+    ]
+    n_with_hist = hist["user_id"].nunique()
+
+    k1, k2, k3 = st.columns(3)
+    k1.metric("目标老客人数", f"{n_old:,}", f"占该目标买家 {n_old / n_total * 100:.1f}%")
+    k2.metric("本期前有历史购买", f"{n_with_hist:,}",
+              f"占老客 {n_with_hist / n_old * 100:.1f}%")
+    k3.metric("历史口径截止", win_start.strftime("%Y-%m-%d"), "本期开始日之前", delta_color="off")
+
+    if n_with_hist == 0:
+        st.info("这批老客在本期开始日之前没有历史购买记录"
+                "（他们的老客资格可能完全形成于本期内）。")
+        return
+
+    st.caption(
+        f"⚠️ 下方占比分母均为「目标老客人数 {n_old:,}」。同一位老客可能历史上从多个来源、"
+        "买过多个品类，故各来源/品类占比之和可 > 100%。"
+    )
+    st.divider()
+
+    # ── A. 历史来源：渠道 + 直播间两级 ────────────────────────────────────
+    st.markdown("### 🛒 历史来源（这批老客当初从哪来）")
+
+    ch_src = (
+        hist.groupby("channel_type")["user_id"].nunique()
+        .sort_values(ascending=False).reset_index(name="历史购买人数")
+    )
+    ch_src["占老客(%)"] = (ch_src["历史购买人数"] / n_old * 100).round(1)
+
+    inf_src = (
+        hist.groupby(["channel_type", "influencer_name"])["user_id"].nunique()
+        .sort_values(ascending=False).reset_index(name="历史购买人数")
+    )
+    inf_src["占老客(%)"] = (inf_src["历史购买人数"] / n_old * 100).round(1)
+
+    col_a1, col_a2 = st.columns([1, 2])
+    with col_a1:
+        st.markdown("**按渠道**")
+        fig_ch = go.Figure(go.Bar(
+            x=ch_src["历史购买人数"], y=ch_src["channel_type"], orientation="h",
+            marker_color="#6C8EBF",
+            text=[f"{v:,}（{p:.1f}%）" for v, p in
+                  zip(ch_src["历史购买人数"], ch_src["占老客(%)"])],
+            textposition="outside",
+            hovertemplate="%{y}<br>人数 %{x:,}<extra></extra>",
+        ))
+        fig_ch.update_layout(
+            height=max(220, len(ch_src) * 60 + 100),
+            xaxis_title="历史购买人数",
+            yaxis=dict(autorange="reversed"),
+            margin=dict(l=10, r=60, t=10, b=10),
+        )
+        st.plotly_chart(fig_ch, use_container_width=True)
+
+    with col_a2:
+        st.markdown("**按直播间（达人昵称）— Top 25**")
+        top_inf = inf_src.head(25)
+        fig_inf = go.Figure(go.Bar(
+            x=top_inf["历史购买人数"],
+            y=top_inf["channel_type"] + " · " + top_inf["influencer_name"].astype(str),
+            orientation="h", marker_color="#4ECDC4",
+            text=[f"{v:,}（{p:.1f}%）" for v, p in
+                  zip(top_inf["历史购买人数"], top_inf["占老客(%)"])],
+            textposition="outside",
+            hovertemplate="%{y}<br>人数 %{x:,}<extra></extra>",
+        ))
+        fig_inf.update_layout(
+            height=max(300, len(top_inf) * 26 + 120),
+            xaxis_title="历史购买人数",
+            yaxis=dict(autorange="reversed"),
+            margin=dict(l=10, r=70, t=10, b=10),
+        )
+        st.plotly_chart(fig_inf, use_container_width=True)
+
+    inf_dl = inf_src.rename(columns={"channel_type": "渠道", "influencer_name": "直播间"})
+    st.download_button(
+        "⬇️ 下载来源明细（渠道×直播间）CSV",
+        inf_dl.to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"老客来源_{target_cat}.csv", mime="text/csv",
+        key="ocs_dl_src",
+    )
+
+    st.divider()
+
+    # ── B. 历史买过的品类（可按来源渠道/直播间筛选，剔除干扰来源）──────────────
+    st.markdown("### 📦 历史买过的品类（这批老客的旧偏好）")
+    st.caption("可先按**来源渠道/直播间**筛选，只看「来自该来源的历史」买过哪些品类；"
+               "留空 = 全部来源。仅影响本区块。")
+
+    fc1, fc2 = st.columns([1, 2])
+    src_ch = fc1.multiselect(
+        "① 来源渠道",
+        ch_src["channel_type"].tolist(), default=[], key="ocs_b_ch",
+    )
+    inf_pool = hist if not src_ch else hist[hist["channel_type"].isin(src_ch)]
+    inf_choices = (
+        inf_pool.groupby("influencer_name")["user_id"].nunique()
+        .sort_values(ascending=False).index.tolist()
+    )
+    src_inf = fc2.multiselect(
+        "② 来源直播间（达人昵称，随渠道联动）",
+        inf_choices, default=[], key="ocs_b_inf",
+    )
+
+    hist_b = hist
+    if src_ch:
+        hist_b = hist_b[hist_b["channel_type"].isin(src_ch)]
+    if src_inf:
+        hist_b = hist_b[hist_b["influencer_name"].isin(src_inf)]
+
+    if hist_b.empty:
+        st.info("该来源筛选下没有历史购买记录，请调整上方筛选。")
+        return
+
+    if src_ch or src_inf:
+        n_src = hist_b["user_id"].nunique()
+        st.caption(f"已筛来源：**{n_src:,}** 位目标老客在此来源有历史购买"
+                   f"（占目标老客 {n_src / n_old * 100:.1f}%）。下方品类基于这批人的该来源历史订单。")
+
+    cat_src = (
+        hist_b.groupby("category")["user_id"].nunique()
+        .sort_values(ascending=False).reset_index(name="历史购买人数")
+    )
+    cat_src["占老客(%)"] = (cat_src["历史购买人数"] / n_old * 100).round(1)
+    # 目标品类自身通常会出现在历史里（老客本就买过该品类），标注一下不剔除
+    cat_src["说明"] = cat_src["category"].apply(
+        lambda c: "← 目标品类本身" if c == target_cat else ""
+    )
+
+    top_cat = cat_src.head(25)
+    fig_cat = go.Figure(go.Bar(
+        x=top_cat["历史购买人数"], y=top_cat["category"], orientation="h",
+        marker_color=["#FF6B6B" if c == target_cat else "#6C8EBF"
+                      for c in top_cat["category"]],
+        text=[f"{v:,}（{p:.1f}%）" for v, p in
+              zip(top_cat["历史购买人数"], top_cat["占老客(%)"])],
+        textposition="outside",
+        hovertemplate="%{y}<br>人数 %{x:,}<extra></extra>",
+    ))
+    fig_cat.update_layout(
+        height=max(320, len(top_cat) * 26 + 120),
+        xaxis_title="历史购买人数",
+        yaxis=dict(title="品类", autorange="reversed"),
+        margin=dict(l=10, r=70, t=10, b=10),
+    )
+    st.plotly_chart(fig_cat, use_container_width=True)
+
+    st.dataframe(
+        cat_src.rename(columns={"category": "品类"}),
+        use_container_width=True, hide_index=True,
+    )
+    st.download_button(
+        "⬇️ 下载历史品类明细 CSV",
+        cat_src.rename(columns={"category": "品类"}).to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"老客历史品类_{target_cat}.csv", mime="text/csv",
+        key="ocs_dl_cat",
+    )
+
+
 def tab_platform_discount(df: pd.DataFrame):
     st.subheader("平台优惠 — 真实收入核算")
     st.caption(
@@ -2661,10 +2875,11 @@ w.document.addEventListener('keydown', blockClearCache, true);
 
     pairs_filtered = filter_pairs(pairs, f)
 
-    t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11 = st.tabs([
+    t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12 = st.tabs([
         "🏷 渠道汇总",
         "📈 新老客趋势",
         "📦 货品分析",
+        "🔎 老客来源",
         "📐 RFM",
         "🔄 渠道流转",
         "🔁 复购率",
@@ -2682,20 +2897,22 @@ w.document.addEventListener('keydown', blockClearCache, true);
     with t3:
         tab_product(df)
     with t4:
-        tab_rfm(df, orders, f)
+        tab_old_customer_source(df, orders, f)
     with t5:
-        tab_channel_flow(df, pairs_filtered)
+        tab_rfm(df, orders, f)
     with t6:
-        tab_repurchase_rate(df, pairs_filtered)
+        tab_channel_flow(df, pairs_filtered)
     with t7:
-        tab_repurchase_cycle(df, pairs_filtered)
+        tab_repurchase_rate(df, pairs_filtered)
     with t8:
-        tab_sample_repurchase(df, df_yoy, f["yoy_on"])
+        tab_repurchase_cycle(df, pairs_filtered)
     with t9:
-        tab_membership(df)
+        tab_sample_repurchase(df, df_yoy, f["yoy_on"])
     with t10:
-        tab_crowd(df)
+        tab_membership(df)
     with t11:
+        tab_crowd(df)
+    with t12:
         tab_platform_discount(df)
 
 
