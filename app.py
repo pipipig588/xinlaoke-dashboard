@@ -986,13 +986,25 @@ def tab_trend(df: pd.DataFrame, df_yoy: pd.DataFrame, yoy_on: bool, f: dict):
 
     _period_label = "日期" if date_col == "order_date" else "月份"
     with st.expander(f"查看明细数据（按{_period_label}，可下载）"):
-        detail_keys = ([date_col] + ([channel_col] if by_channel and channel_col else [])
-                       + ["customer_type"])
+        period_keys = [date_col] + ([channel_col] if by_channel and channel_col else [])
+        detail_keys = period_keys + ["customer_type"]
+        # 订单数 / GMV 是订单级，直接聚合
         detail = df.groupby(detail_keys).agg(
             订单数=("gmv", "count"),
             GMV=("gmv", "sum"),
-            人数=("user_id", "nunique"),
-        ).reset_index().sort_values(detail_keys)
+        ).reset_index()
+        # 人数按互斥口径(新客优先)，与上方汇总表 / 表头 KPI 一致：
+        # 每个周期内有任意新客订单=新客，否则=老客 → 新客+老客=该周期去重人数，
+        # 不会因「同人本月既有新客单又有老客单」被新老客重复计。
+        total_p = df.groupby(period_keys)["user_id"].nunique()
+        new_p = (df[df["customer_type"] == "新客"].groupby(period_keys)["user_id"].nunique()
+                 .reindex(total_p.index, fill_value=0))
+        new_ppl = new_p.rename("人数").reset_index(); new_ppl["customer_type"] = "新客"
+        old_ppl = (total_p - new_p).rename("人数").reset_index(); old_ppl["customer_type"] = "老客"
+        ppl = pd.concat([new_ppl, old_ppl], ignore_index=True)
+        detail = detail.merge(ppl, on=detail_keys, how="left")
+        detail["人数"] = detail["人数"].fillna(0).astype(int)
+        detail = detail.sort_values(detail_keys)
         detail["GMV"] = detail["GMV"].round(2)
         detail[date_col] = detail[date_col].astype(str)
         rename_map = {date_col: _period_label, "customer_type": "客户类型"}
