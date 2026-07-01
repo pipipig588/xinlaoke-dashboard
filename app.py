@@ -398,10 +398,9 @@ def _kpi_stats(df: pd.DataFrame) -> dict:
     df_new = df[df["customer_type"] == "新客"]
     df_old = df[df["customer_type"] == "老客"]
 
-    user_type = (
-        df.groupby("user_id")["customer_type"]
-        .apply(lambda s: "新客" if "新客" in s.values else "老客")
-    )
+    # 向量化(原 groupby.apply 在百万行下要 60s+)：用户有任意新客订单=新客，否则老客
+    has_new = df["customer_type"].eq("新客").groupby(df["user_id"]).any()
+    user_type = has_new.map({True: "新客", False: "老客"})
     n_total = len(user_type)
     n_new   = int((user_type == "新客").sum())
     n_old   = int((user_type == "老客").sum())
@@ -772,10 +771,9 @@ def _build_trend_daily(df: pd.DataFrame, date_col: str, count_mode,
 def _build_summary_table(df: pd.DataFrame) -> pd.DataFrame:
     """生成 全店/新客/老客 × 订单数/人数/GMV/客单价 的汇总表。
     人数按互斥口径(与表头一致)：有任意新客订单=新客，否则=老客 → 新客+老客=全店去重人数。"""
-    user_type = (
-        df.groupby("user_id")["customer_type"]
-        .apply(lambda s: "新客" if "新客" in s.values else "老客")
-    )
+    # 向量化(原 groupby.apply 在百万行下要 60s+)
+    has_new = df["customer_type"].eq("新客").groupby(df["user_id"]).any()
+    user_type = has_new.map({True: "新客", False: "老客"})
     persons_map = {
         "全店": len(user_type),
         "新客": int((user_type == "新客").sum()),
@@ -985,7 +983,54 @@ def tab_trend(df: pd.DataFrame, df_yoy: pd.DataFrame, yoy_on: bool, f: dict):
         )
 
     _period_label = "日期" if date_col == "order_date" else "月份"
-    with st.expander(f"查看明细数据（按{_period_label}，可下载）"):
+    _gran_txt = "按天" if date_col == "order_date" else "按月"
+
+    # ── 📅 按周期汇总（汇总 by day/month，随「时间粒度」联动）──
+    # 一行一个周期，含 全店/新客/老客 的 订单数·人数·GMV·客单价。
+    # GMV 已随左侧品类筛选（df 已按品类过滤，gmv=子订单实付）→ 只统计所选品类的实付。
+    _pk = [date_col] + ([channel_col] if by_channel and channel_col else [])
+    _sm = df.groupby(_pk).agg(订单数=("gmv", "count"), GMV=("gmv", "sum"))
+    _tp = df.groupby(_pk)["user_id"].nunique()
+    _np = (df[df["customer_type"] == "新客"].groupby(_pk)["user_id"].nunique()
+           .reindex(_tp.index, fill_value=0))
+    _ng = (df[df["customer_type"] == "新客"].groupby(_pk)["gmv"].sum()
+           .reindex(_tp.index, fill_value=0))
+    _og = (df[df["customer_type"] == "老客"].groupby(_pk)["gmv"].sum()
+           .reindex(_tp.index, fill_value=0))
+    _sm["人数"]     = _tp
+    _sm["客单价"]   = (_sm["GMV"] / _tp.replace(0, 1)).round(0)
+    _sm["新客人数"] = _np
+    _sm["老客人数"] = (_tp - _np)
+    _sm["新客GMV"]  = _ng.round(0)
+    _sm["老客GMV"]  = _og.round(0)
+    _sm["GMV"]      = _sm["GMV"].round(0)
+    _sm = _sm.reset_index().sort_values(_pk)
+    _sm[date_col] = _sm[date_col].astype(str)
+    _rn = {date_col: _period_label}
+    if by_channel and channel_col:
+        _rn[channel_col] = channel_label
+    _sm = _sm.rename(columns=_rn)
+    _order = ([_period_label] + ([channel_label] if by_channel and channel_col else [])
+              + ["订单数", "人数", "GMV", "客单价", "新客人数", "老客人数", "新客GMV", "老客GMV"])
+    _sm = _sm[_order]
+    st.markdown(f"#### 📅 按{_period_label}汇总（{_gran_txt}，新老客）")
+    st.caption("每行一个周期，含全店/新客/老客的 订单数·人数·GMV·客单价。"
+               "人数为互斥口径(新客优先，与表头一致)；GMV 随左侧品类筛选，仅统计所选品类的实付金额。")
+    st.dataframe(
+        _sm.style.format({
+            "订单数": "{:,}", "人数": "{:,}", "GMV": "¥{:,.0f}", "客单价": "¥{:,.0f}",
+            "新客人数": "{:,}", "老客人数": "{:,}", "新客GMV": "¥{:,.0f}", "老客GMV": "¥{:,.0f}",
+        }),
+        use_container_width=True, hide_index=True, height=320,
+    )
+    st.download_button(
+        f"📥 下载按{_period_label}汇总 CSV",
+        data=_sm.to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"trend_summary_{'day' if date_col == 'order_date' else 'month'}.csv",
+        mime="text/csv", key="t1_dl_summary",
+    )
+
+    with st.expander(f"查看明细数据（按{_period_label} × 新老客长表，可下载）"):
         period_keys = [date_col] + ([channel_col] if by_channel and channel_col else [])
         detail_keys = period_keys + ["customer_type"]
         # 订单数 / GMV 是订单级，直接聚合
@@ -993,16 +1038,15 @@ def tab_trend(df: pd.DataFrame, df_yoy: pd.DataFrame, yoy_on: bool, f: dict):
             订单数=("gmv", "count"),
             GMV=("gmv", "sum"),
         ).reset_index()
-        # 人数按互斥口径(新客优先)，与上方汇总表 / 表头 KPI 一致：
-        # 每个周期内有任意新客订单=新客，否则=老客 → 新客+老客=该周期去重人数，
-        # 不会因「同人本月既有新客单又有老客单」被新老客重复计。
-        total_p = df.groupby(period_keys)["user_id"].nunique()
-        new_p = (df[df["customer_type"] == "新客"].groupby(period_keys)["user_id"].nunique()
-                 .reindex(total_p.index, fill_value=0))
-        new_ppl = new_p.rename("人数").reset_index(); new_ppl["customer_type"] = "新客"
-        old_ppl = (total_p - new_p).rename("人数").reset_index(); old_ppl["customer_type"] = "老客"
-        ppl = pd.concat([new_ppl, old_ppl], ignore_index=True)
-        detail = detail.merge(ppl, on=detail_keys, how="left")
+        # 人数按互斥口径(新客优先)，与汇总表/表头一致：有任意新客单=新客，否则老客，
+        # 新客+老客=该周期去重人数，不因「同人同周期既有新单又有老单」重复计。
+        _tp2 = df.groupby(period_keys)["user_id"].nunique()
+        _np2 = (df[df["customer_type"] == "新客"].groupby(period_keys)["user_id"].nunique()
+                .reindex(_tp2.index, fill_value=0))
+        _new_ppl = _np2.rename("人数").reset_index(); _new_ppl["customer_type"] = "新客"
+        _old_ppl = (_tp2 - _np2).rename("人数").reset_index(); _old_ppl["customer_type"] = "老客"
+        _ppl = pd.concat([_new_ppl, _old_ppl], ignore_index=True)
+        detail = detail.merge(_ppl, on=detail_keys, how="left")
         detail["人数"] = detail["人数"].fillna(0).astype(int)
         detail = detail.sort_values(detail_keys)
         detail["GMV"] = detail["GMV"].round(2)
@@ -1517,6 +1561,42 @@ def _r_date_range(label: str, cutoff: pd.Timestamp) -> str:
     return f"{start.strftime('%Y-%m-%d')} ~ {end.strftime('%Y-%m-%d')}"
 
 
+def _r_date_range_lohi(lo: int, hi, cutoff: pd.Timestamp) -> str:
+    """按任意 (lo, hi] 天数区间反推日期范围（用于自定义 R 桶）。"""
+    if hi is None:
+        end = cutoff - pd.Timedelta(days=lo)
+        return f"≤ {end.strftime('%Y-%m-%d')}"
+    start = cutoff - pd.Timedelta(days=hi) + pd.Timedelta(days=1)
+    end   = cutoff - pd.Timedelta(days=lo)
+    return f"{start.strftime('%Y-%m-%d')} ~ {end.strftime('%Y-%m-%d')}"
+
+
+def _buckets_from_breakpoints(bps: list) -> list:
+    """把一串天数断点切成 (标签, 下界, 上界] 的桶；最后一段开口。
+    例：[0,15,45] → [("0-15天",0,15),("15-45天",15,45),("45+天",45,None)]"""
+    nums = sorted({int(x) for x in bps})
+    nums = [n for n in nums if n >= 0]
+    if not nums or nums[0] != 0:
+        nums = [0] + [n for n in nums if n > 0]
+    out = []
+    for i in range(len(nums) - 1):
+        out.append((f"{nums[i]}-{nums[i+1]}天", nums[i], nums[i+1]))
+    out.append((f"{nums[-1]}+天", nums[-1], None))
+    return out
+
+
+def _assign_bucket(days: float, buckets: list) -> str:
+    """按 (下界, 上界] 把天数分配到桶，最短桶优先（与 _r_bucket_label 同口径）。"""
+    for label, lo, hi in buckets:
+        if hi is None:
+            if days > lo:
+                return label
+        else:
+            if days <= hi and (lo == 0 or days > lo):
+                return label
+    return buckets[-1][0]
+
+
 def _bucket_label(v: float, buckets: list) -> str:
     for label, lo, hi in buckets:
         if hi is None:
@@ -1614,29 +1694,37 @@ def tab_rfm(df: pd.DataFrame, orders_all: pd.DataFrame, f: dict):
     df_repurch = df[(df["pay_time"] > cutoff_ts) & (df["pay_time"] <= repurch_end_ts)]
     repurch_users = set(df_repurch["user_id"].unique())
     user_summary["is_repurch"] = user_summary["user_id"].isin(repurch_users).astype(int)
+    # 回购金额 = 该老客在回购窗口内(全局筛选)的正装 GMV；非回购用户记 0
+    repurch_gmv_by_user = df_repurch.groupby("user_id")["gmv"].sum()
+    user_summary["repurch_gmv"] = user_summary["user_id"].map(repurch_gmv_by_user).fillna(0.0)
 
     # 分桶
     user_summary["R_bucket"] = user_summary["R_days"].apply(_r_bucket_label)
     user_summary["F_bucket"] = user_summary["order_count"].apply(lambda x: _bucket_label(x, _F_BUCKETS))
     user_summary["M_bucket"] = user_summary["total_gmv"].apply(lambda x: _bucket_label(x, _M_BUCKETS))
 
-    def render_dim(col: str, label: str, bucket_order: list, with_date: bool = False):
+    def render_dim(col: str, label: str, bucket_order: list, with_date: bool = False,
+                   date_func=None):
         agg = (
             user_summary.groupby(col)
-            .agg(老客基数=("user_id", "count"), 回购人数=("is_repurch", "sum"))
+            .agg(老客基数=("user_id", "count"), 回购人数=("is_repurch", "sum"),
+                 回购金额=("repurch_gmv", "sum"))
             .reindex(bucket_order, fill_value=0)
             .reset_index()
             .rename(columns={col: label})
         )
+        agg["回购金额"] = agg["回购金额"].round(0)
         agg["回购率(%)"] = (agg["回购人数"] / agg["老客基数"].replace(0, 1) * 100).round(2)
 
         if with_date:
-            agg.insert(1, "日期范围", agg[label].apply(lambda lab: _r_date_range(lab, cutoff_ts)))
+            _df = date_func or (lambda lab: _r_date_range(lab, cutoff_ts))
+            agg.insert(1, "日期范围", agg[label].apply(_df))
 
         total = {
             label: "TTL",
             "老客基数": int(agg["老客基数"].sum()),
             "回购人数": int(agg["回购人数"].sum()),
+            "回购金额": float(agg["回购金额"].sum()),
             "回购率(%)": round(agg["回购人数"].sum() / agg["老客基数"].sum() * 100, 2) if agg["老客基数"].sum() else 0,
         }
         if with_date:
@@ -1648,7 +1736,7 @@ def tab_rfm(df: pd.DataFrame, orders_all: pd.DataFrame, f: dict):
     st.markdown(f"#### 🕐 R — 最近购买距 **{cutoff_ts.strftime('%Y-%m-%d')}** 天数")
     r_order = [b[0] for b in _R_BUCKETS]
     r_table = render_dim("R_bucket", "R 桶", r_order, with_date=True)
-    fmt = {"老客基数": "{:,.0f}", "回购人数": "{:,.0f}", "回购率(%)": "{:.2f}%"}
+    fmt = {"老客基数": "{:,.0f}", "回购人数": "{:,.0f}", "回购金额": "¥{:,.0f}", "回购率(%)": "{:.2f}%"}
     def highlight_ttl(row, label):
         return ["background-color:#fff4e6;font-weight:600" if str(row[label]) == "TTL" else ""] * len(row)
     st.dataframe(
@@ -1668,6 +1756,44 @@ def tab_rfm(df: pd.DataFrame, orders_all: pd.DataFrame, f: dict):
         )
         fig_r.update_traces(texttemplate="%{text:.2f}%", textposition="outside")
         st.plotly_chart(fig_r, use_container_width=True)
+
+    # ── 自定义 R 区间（断点输入 → 自动整表，模板 6 桶之外的自由时段）──
+    st.markdown("#### 🎚 自定义 R 区间")
+    st.caption(
+        "填**天数断点**（逗号分隔），自动切成多段，看每段的老客基数 / 回购人数 / 回购金额 / 回购率。"
+        "口径与上方 R 表完全一致，只是分桶边界由你定。例：`0,15,45,90,180,365`。"
+    )
+    bp_str = st.text_input("R 断点（天，逗号分隔）", value="0,15,45,90,180,365", key="rfm_custom_r")
+    try:
+        parsed = [int(x.strip()) for x in bp_str.replace("，", ",").split(",") if x.strip() != ""]
+    except ValueError:
+        parsed = []
+    if len(parsed) < 1:
+        st.info("请输入至少 1 个有效的天数断点（如 `0,30,90`）。")
+    else:
+        custom_buckets = _buckets_from_breakpoints(parsed)
+        custom_order = [b[0] for b in custom_buckets]
+        _lohi = {lab: (lo, hi) for lab, lo, hi in custom_buckets}
+        user_summary["R_custom"] = user_summary["R_days"].apply(
+            lambda d: _assign_bucket(d, custom_buckets))
+        custom_table = render_dim(
+            "R_custom", "自定义 R 桶", custom_order, with_date=True,
+            date_func=lambda lab: _r_date_range_lohi(_lohi[lab][0], _lohi[lab][1], cutoff_ts),
+        )
+        st.dataframe(
+            custom_table.style.format(fmt).apply(lambda r: highlight_ttl(r, "自定义 R 桶"), axis=1),
+            use_container_width=True, hide_index=True,
+        )
+        c_chart = custom_table[custom_table["自定义 R 桶"] != "TTL"]
+        if not c_chart.empty:
+            fig_c = px.bar(
+                c_chart, x="自定义 R 桶", y="回购率(%)",
+                text="回购率(%)", color="老客基数", color_continuous_scale="Blues",
+                labels={"自定义 R 桶": "R（自定义区间）", "回购率(%)": "回购率 (%)"},
+                height=320, title="自定义 R 区间的回购率对比",
+            )
+            fig_c.update_traces(texttemplate="%{text:.2f}%", textposition="outside")
+            st.plotly_chart(fig_c, use_container_width=True)
 
     st.divider()
 
@@ -1898,21 +2024,29 @@ def tab_old_customer_source(df: pd.DataFrame, orders: pd.DataFrame, f: dict):
         return
 
     c1, c2 = st.columns([1, 1])
-    target_cat = c1.selectbox(
-        "① 目标品类",
+    target_cats = c1.multiselect(
+        "① 目标品类（可多选，留空 = 全部品类 = 全店老客）",
         cat_old.index.tolist(),
+        default=[],
         format_func=lambda c: f"{c}（老客 {int(cat_old[c]):,} 人）",
         key="ocs_cat",
     )
 
-    cat_df = df[df["category"] == target_cat]
+    cat_df = df if not target_cats else df[df["category"].isin(target_cats)]
     sku_opts = (
         cat_df.groupby("sku")["user_id"].nunique().sort_values(ascending=False).index.tolist()
     )
     target_skus = c2.multiselect(
-        "② 下钻货号（可选，留空 = 整个品类）", sku_opts, default=[], key="ocs_sku"
+        "② 下钻货号（可选，留空 = 上面所选品类的全部货号）", sku_opts, default=[], key="ocs_sku"
     )
     target_df = cat_df if not target_skus else cat_df[cat_df["sku"].isin(target_skus)]
+    # 用于文件名/高亮：选了品类就用之，全选(空)时标记为「全部品类」
+    if not target_cats:
+        target_label = "全部品类"
+    elif len(target_cats) <= 3:
+        target_label = "、".join(target_cats)
+    else:
+        target_label = f"多品类{len(target_cats)}个"
 
     # ── 锁定目标老客 ──────────────────────────────────────────────────────
     old_users = target_df.loc[target_df["customer_type"] == "老客", "user_id"].unique()
@@ -2007,7 +2141,7 @@ def tab_old_customer_source(df: pd.DataFrame, orders: pd.DataFrame, f: dict):
     st.download_button(
         "⬇️ 下载来源明细（渠道×直播间）CSV",
         inf_dl.to_csv(index=False).encode("utf-8-sig"),
-        file_name=f"老客来源_{target_cat}.csv", mime="text/csv",
+        file_name=f"老客来源_{target_label}.csv", mime="text/csv",
         key="ocs_dl_src",
     )
 
@@ -2053,15 +2187,17 @@ def tab_old_customer_source(df: pd.DataFrame, orders: pd.DataFrame, f: dict):
         .sort_values(ascending=False).reset_index(name="历史购买人数")
     )
     cat_src["占老客(%)"] = (cat_src["历史购买人数"] / n_old * 100).round(1)
-    # 目标品类自身通常会出现在历史里（老客本就买过该品类），标注一下不剔除
+    # 目标品类自身通常会出现在历史里（老客本就买过该品类），标注一下不剔除；
+    # 全选(未指定品类)时无「目标」概念，不标注。
+    target_set = set(target_cats)
     cat_src["说明"] = cat_src["category"].apply(
-        lambda c: "← 目标品类本身" if c == target_cat else ""
+        lambda c: "← 目标品类本身" if c in target_set else ""
     )
 
     top_cat = cat_src.head(25)
     fig_cat = go.Figure(go.Bar(
         x=top_cat["历史购买人数"], y=top_cat["category"], orientation="h",
-        marker_color=["#FF6B6B" if c == target_cat else "#6C8EBF"
+        marker_color=["#FF6B6B" if c in target_set else "#6C8EBF"
                       for c in top_cat["category"]],
         text=[f"{v:,}（{p:.1f}%）" for v, p in
               zip(top_cat["历史购买人数"], top_cat["占老客(%)"])],
@@ -2083,7 +2219,7 @@ def tab_old_customer_source(df: pd.DataFrame, orders: pd.DataFrame, f: dict):
     st.download_button(
         "⬇️ 下载历史品类明细 CSV",
         cat_src.rename(columns={"category": "品类"}).to_csv(index=False).encode("utf-8-sig"),
-        file_name=f"老客历史品类_{target_cat}.csv", mime="text/csv",
+        file_name=f"老客历史品类_{target_label}.csv", mime="text/csv",
         key="ocs_dl_cat",
     )
 
@@ -2268,7 +2404,8 @@ def tab_platform_discount(df: pd.DataFrame):
     )
 
 
-def tab_sample_repurchase(df: pd.DataFrame, df_yoy: pd.DataFrame = None, yoy_on: bool = False):
+def tab_sample_repurchase(df: pd.DataFrame, df_yoy: pd.DataFrame = None, yoy_on: bool = False,
+                          orders_all: pd.DataFrame = None, f: dict = None):
     """派样（低价试用装）回购分析。
 
     回购定义：在所选派样窗口内买过试用装的顾客，只要在全局筛选范围内有过正装购买即算回购。
@@ -2362,17 +2499,30 @@ def tab_sample_repurchase(df: pd.DataFrame, df_yoy: pd.DataFrame = None, yoy_on:
     repur_rate     = (n_repur_users / n_buyers) if n_buyers else 0.0
     repur_gmv      = float(repur["gmv"].sum())
 
-    # 新客 = 买样用户中在全局筛选范围内有正装订单、且被判定为新客的人数。
-    #   口径与全店 KPI 完全一致：只要其正装订单里出现过「新客」即记为新客；
-    #   「老客判定」默认 = 交易成功(已完成) 的正装客，可由左侧「老客判定规则」修改。
-    #   拉新率 = 新客人数 ÷ 买样人数。
-    if not repur.empty:
-        utype = repur.groupby("user_id")["customer_type"].apply(
-            lambda s: "新客" if (s == "新客").any() else "老客")
-        n_new_users = int((utype == "新客").sum())
-    else:
-        n_new_users = 0
-    acq_rate = (n_new_users / n_buyers) if n_buyers else 0.0
+    # 买样用户的新/老客身份（同表头口径）：老客 = 在全局筛选时间段「开始日之前」有过
+    #   ≥老客门槛金额(默认550)且成交(已完成/已发货/待发货)的正装购买；否则新客。
+    #   该判定独立于回购时间窗，对全部买样用户(含从未买过正装的人)统一适用。
+    buyer_ids = first_smp["user_id"].tolist()
+    old_buyer_ids = set()
+    if orders_all is not None and len(orders_all) and f and len(f.get("date_range") or ()) == 2:
+        win_start = pd.Timestamp(f["date_range"][0])
+        min_amt = float(f.get("old_cust_amount", 550))
+        _q = orders_all[
+            orders_all["order_status"].isin(TRANSACTION_SUCCESS_STATUSES)
+            & (orders_all["gmv"] >= min_amt)
+            & (orders_all["pay_time"] < win_start)
+        ]
+        old_buyer_ids = set(_q["user_id"].unique())
+    buyer_is_new = pd.Series(
+        [u not in old_buyer_ids for u in buyer_ids],
+        index=pd.Index(buyer_ids, name="user_id"),
+    )
+
+    # 派样新客人数 = 买样人数中的新客；回购新客数 = 实际回购(有正装回购单)的人里的新客。
+    n_smp_new   = int(buyer_is_new.sum())
+    n_repur_new = int(buyer_is_new.reindex(repur["user_id"].unique()).fillna(True).sum()) if not repur.empty else 0
+    # 拉新率 = 回购新客数 ÷ 买样人数（买样人群转化成正装新客的比例，即派样真正拉到的新客）。
+    acq_rate = (n_repur_new / n_buyers) if n_buyers else 0.0
 
     # YoY：同一批买样用户在左侧「同比时间段」内的正装回购表现
     yoy_active = yoy_on and df_yoy is not None and not df_yoy.empty
@@ -2386,33 +2536,34 @@ def tab_sample_repurchase(df: pd.DataFrame, df_yoy: pd.DataFrame = None, yoy_on:
         y_rate   = (y_users / n_buyers) if n_buyers else 0.0
         y_gmv    = float(repur_y["gmv"].sum())
         if not repur_y.empty:
-            utype_y = repur_y.groupby("user_id")["customer_type"].apply(
-                lambda s: "新客" if (s == "新客").any() else "老客")
-            y_new = int((utype_y == "新客").sum())
+            # 同比口径下的「回购新客数」：同一批买样用户在同比窗口里回购、且为新客的人数
+            y_new = int(buyer_is_new.reindex(repur_y["user_id"].unique()).fillna(True).sum())
         y_acq = (y_new / n_buyers) if n_buyers else 0.0
 
     # ── 维度1：活动期间整体 KPI ──
     st.markdown("##### 📊 活动期间整体（按所选派样窗口）")
     if yoy_active:
         st.caption("同比差值 = 同一批买样用户在左侧「同比时间段」内的正装回购（派样订单数 / 买样人数不随同比变化）。")
-    kc = st.columns(8)
+    kc = st.columns(9)
     kc[0].metric("派样订单数", f"{n_smp_orders:,}", help="所选派样窗口内的派样订单总数（含同人多单）")
     kc[1].metric("买样人数", f"{n_buyers:,}")
-    kc[2].metric("新客人数", f"{n_new_users:,}",
-                 delta=(f"{n_new_users - y_new:+,}" if yoy_active else None),
-                 help="买样用户中、在全局筛选内有正装订单且被判定为新客的人数。"
-                      "口径同全店 KPI；老客判定默认=交易成功正装客，可在左侧「老客判定规则」修改")
+    kc[2].metric("派样新客人数", f"{n_smp_new:,}",
+                 help="买样人数中的新客。老客=全局时间段开始日之前有过≥老客门槛(默认550)且成交的购买；"
+                      "其余(含从未买过正装)记为新客。不随同比时间窗变化。")
     kc[3].metric("拉新率", f"{acq_rate * 100:.2f}%",
                  delta=(f"{(acq_rate - y_acq) * 100:+.2f}pp" if yoy_active else None),
-                 help="新客人数 ÷ 买样人数")
+                 help="回购新客数 ÷ 买样人数（买样人群转化成正装新客的比例）")
     kc[4].metric("回购人数", f"{n_repur_users:,}",
                  delta=(f"{n_repur_users - y_users:+,}" if yoy_active else None))
-    kc[5].metric("回购订单数", f"{n_repur_orders:,}",
+    kc[5].metric("回购新客数", f"{n_repur_new:,}",
+                 delta=(f"{n_repur_new - y_new:+,}" if yoy_active else None),
+                 help="实际回购(有正装回购单)的买样用户中、被判定为新客的人数。口径同表头。")
+    kc[6].metric("回购订单数", f"{n_repur_orders:,}",
                  delta=(f"{n_repur_orders - y_orders:+,}" if yoy_active else None))
-    kc[6].metric("回购率", f"{repur_rate * 100:.2f}%",
+    kc[7].metric("回购率", f"{repur_rate * 100:.2f}%",
                  delta=(f"{(repur_rate - y_rate) * 100:+.2f}pp" if yoy_active else None),
                  help="回购人数 ÷ 买样人数")
-    kc[7].metric("回购GMV", f"¥{repur_gmv:,.0f}",
+    kc[8].metric("回购GMV", f"¥{repur_gmv:,.0f}",
                  delta=(f"{repur_gmv - y_gmv:+,.0f}" if yoy_active else None))
 
     st.divider()
@@ -2485,9 +2636,10 @@ def tab_sample_repurchase(df: pd.DataFrame, df_yoy: pd.DataFrame = None, yoy_on:
     # ── 派样货品明细：按 派样类型 × 商品（货号）看派样→回购（参考线下表）──
     st.markdown("##### 🧾 派样货品明细（按 派样类型 × 货号）")
     st.caption(
-        "**派样订单数**=该派样货品的派样订单数(不去重)，**派样人数**=去重买样人数；**回购人数/订单数/金额/AUS** = 这些人在全局筛选范围内的"
-        "正装订单。**回购订单数**不去重，**回购AUS** = 回购金额 ÷ 回购人数，**回购率** = 回购人数 ÷ 派样人数。"
-        "同一人若试用多款会分别计入各款；每个派样类型「小计」按人去重。"
+        "**派样订单数**=该派样货品的派样订单数(不去重)，**派样人数**=去重买样人数，**派样新客人数**=派样人数中的新客；"
+        "**回购人数/新客人数/订单数/金额/AUS** = 这些人在全局筛选范围内的"
+        "正装订单。**回购新客人数**=回购人数中的新客，**回购订单数**不去重，**回购AUS** = 回购金额 ÷ 回购人数，**回购率** = 回购人数 ÷ 派样人数。"
+        "新客判定同表头(正装订单 customer_type)；同一人若试用多款会分别计入各款；每个派样类型「小计」按人去重。"
     )
 
     # 每个买样用户的正装回购汇总（金额 / 订单数）
@@ -2497,22 +2649,26 @@ def tab_sample_repurchase(df: pd.DataFrame, df_yoy: pd.DataFrame = None, yoy_on:
     )
     repur_user_set = set(user_repur["user_id"])
 
-    # 买样用户 ×（派样类型, 货号）去重成员关系
+    # 买样用户 ×（派样类型, 货号）去重成员关系；is_new = 该买样用户是否新客(同表头口径)
     memb = smp[["user_id", "sample_type", "sku"]].drop_duplicates().merge(
         user_repur, on="user_id", how="left")
     memb["is_rep"] = memb["user_id"].isin(repur_user_set)
+    memb["is_new"] = memb["user_id"].map(buyer_is_new).fillna(True)
     # 类型级（按人去重，用于小计）
     memb_type = smp[["user_id", "sample_type"]].drop_duplicates().merge(
         user_repur, on="user_id", how="left")
     memb_type["is_rep"] = memb_type["user_id"].isin(repur_user_set)
+    memb_type["is_new"] = memb_type["user_id"].map(buyer_is_new).fillna(True)
 
     def _detail_for(mb, keys):
         n_smp = mb.groupby(keys)["user_id"].nunique().rename("派样人数")
+        n_smp_new = mb.groupby(keys)["is_new"].sum().rename("派样新客人数")
         rep = mb[mb["is_rep"]]
         n_rep = rep.groupby(keys)["user_id"].nunique().rename("回购人数")
+        n_rep_new = rep.groupby(keys)["is_new"].sum().rename("回购新客人数")
         n_ord = rep.groupby(keys)["rep_orders"].sum().rename("回购订单数")
         gmv = rep.groupby(keys)["rep_gmv"].sum().rename("回购金额")
-        out = pd.concat([n_smp, n_rep, n_ord, gmv], axis=1).fillna(0)
+        out = pd.concat([n_smp, n_smp_new, n_rep, n_rep_new, n_ord, gmv], axis=1).fillna(0)
         out["回购金额"] = out["回购金额"].round(0)
         out["回购AUS"] = (out["回购金额"] / out["回购人数"].replace(0, 1)).round(0)
         out["回购率(%)"] = (out["回购人数"] / out["派样人数"].replace(0, 1) * 100).round(2)
@@ -2525,24 +2681,27 @@ def tab_sample_repurchase(df: pd.DataFrame, df_yoy: pd.DataFrame = None, yoy_on:
     smp_ord_sku  = smp.groupby(["sample_type", "sku"]).size()
     smp_ord_type = smp.groupby("sample_type").size()
 
-    cols = ["派样类型", "商品", "派样订单数", "派样人数", "回购人数", "回购订单数",
-            "回购金额", "回购AUS", "回购率(%)"]
+    cols = ["派样类型", "商品", "派样订单数", "派样人数", "派样新客人数", "回购人数",
+            "回购新客人数", "回购订单数", "回购金额", "回购AUS", "回购率(%)"]
     rows = []
     for stype in sorted(per["sample_type"].unique()):
         sub = per[per["sample_type"] == stype].sort_values("派样人数", ascending=False)
         for _, r in sub.iterrows():
             rows.append([stype, r["sku"], int(smp_ord_sku.get((stype, r["sku"]), 0)),
-                         int(r["派样人数"]), int(r["回购人数"]),
-                         int(r["回购订单数"]), r["回购金额"], r["回购AUS"], r["回购率(%)"]])
+                         int(r["派样人数"]), int(r["派样新客人数"]), int(r["回购人数"]),
+                         int(r["回购新客人数"]), int(r["回购订单数"]),
+                         r["回购金额"], r["回购AUS"], r["回购率(%)"]])
         tr = tot[tot["sample_type"] == stype]
         if not tr.empty:
             r = tr.iloc[0]
             rows.append([stype, "小计", int(smp_ord_type.get(stype, 0)),
-                         int(r["派样人数"]), int(r["回购人数"]),
-                         int(r["回购订单数"]), r["回购金额"], r["回购AUS"], r["回购率(%)"]])
+                         int(r["派样人数"]), int(r["派样新客人数"]), int(r["回购人数"]),
+                         int(r["回购新客人数"]), int(r["回购订单数"]),
+                         r["回购金额"], r["回购AUS"], r["回购率(%)"]])
     detail = pd.DataFrame(rows, columns=cols)
 
-    fmt = {"派样订单数": "{:,.0f}", "派样人数": "{:,.0f}", "回购人数": "{:,.0f}",
+    fmt = {"派样订单数": "{:,.0f}", "派样人数": "{:,.0f}", "派样新客人数": "{:,.0f}",
+           "回购人数": "{:,.0f}", "回购新客人数": "{:,.0f}",
            "回购订单数": "{:,.0f}", "回购金额": "{:,.0f}",
            "回购AUS": "{:,.0f}", "回购率(%)": "{:.2f}%"}
     st.dataframe(detail.style.format(fmt), use_container_width=True, hide_index=True, height=460)
@@ -2657,14 +2816,29 @@ def tab_membership(df: pd.DataFrame):
 
     st.divider()
     st.markdown("##### 👥 会员 vs 非会员（全局筛选范围内的下单用户）")
-    d = df.copy()
-    d["是否会员"] = "非会员"
-    d.loc[d["user_id"].isin(member_ids), "是否会员"] = "会员"
+    # 提速：不再 df.copy()(215万行整表复制)，改用布尔分组键直接 groupby。
+    seg = (
+        df["user_id"].isin(member_ids)
+        .map({True: "会员", False: "非会员"}).rename("是否会员")
+    )
     vs = (
-        d.groupby("是否会员")
+        df.groupby(seg, observed=True)
         .agg(下单人数=("user_id", "nunique"), 订单数=("gmv", "count"), GMV=("gmv", "sum"))
         .reset_index()
     )
+
+    # 会员占比（会员与非会员互斥，合计=全体）
+    tot_buyers = int(vs["下单人数"].sum())
+    tot_gmv    = float(vs["GMV"].sum())
+    _m = vs[vs["是否会员"] == "会员"]
+    mem_buyers = int(_m["下单人数"].iloc[0]) if not _m.empty else 0
+    mem_gmv    = float(_m["GMV"].iloc[0]) if not _m.empty else 0.0
+    mc1, mc2 = st.columns(2)
+    mc1.metric("会员成交人数占比", f"{(mem_buyers / tot_buyers * 100 if tot_buyers else 0):.2f}%",
+               help="会员下单人数 ÷ 全体下单人数（会员/非会员互斥，全局筛选范围内）")
+    mc2.metric("会员成交金额占比", f"{(mem_gmv / tot_gmv * 100 if tot_gmv else 0):.2f}%",
+               help="会员 GMV ÷ 全体 GMV（全局筛选范围内）")
+
     vs["客单价"]   = (vs["GMV"] / vs["下单人数"].replace(0, 1)).round(0)
     vs["购买频次"] = (vs["订单数"] / vs["下单人数"].replace(0, 1)).round(2)
     vs["GMV"]      = vs["GMV"].round(0)
@@ -2919,7 +3093,7 @@ w.document.addEventListener('keydown', blockClearCache, true);
     with t8:
         tab_repurchase_cycle(df, pairs_filtered)
     with t9:
-        tab_sample_repurchase(df, df_yoy, f["yoy_on"])
+        tab_sample_repurchase(df, df_yoy, f["yoy_on"], orders, f)
     with t10:
         tab_membership(df)
     with t11:
